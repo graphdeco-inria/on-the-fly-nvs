@@ -53,7 +53,6 @@ fi
 
 if [ "$COMPOSEUP" = true ]; then
     echo "Starting docker container..."
-    mkdir -p ../data
     docker compose up -d
     if [ "$?" -ne 0 ]; then
         echo "Docker compose up failed!"
