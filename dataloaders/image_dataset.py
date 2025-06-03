@@ -68,6 +68,17 @@ class ImageDataset:
 
         first_image = self._load_image(self.image_paths[0])
         self.width, self.height = first_image.shape[2], first_image.shape[1]
+        res = self.width * self.height
+        max_res = 1_500_000  # 1.5 Mpx
+        if self.downsampling <= 0.0 and res > max_res:
+            logging.warning(
+                "Large images, downsampling to 1.5 Mpx. "
+                "If this is not desired, please use --downsampling=1"
+            )
+            self.downsampling = (res / max_res) ** 0.5
+            first_image = self._load_image(self.image_paths[0])
+            self.width, self.height = first_image.shape[2], first_image.shape[1]
+
 
         # Load COLMAP data
         self.load_colmap_data(os.path.join(args.source_path, "sparse/0"))
@@ -109,7 +120,7 @@ class ImageDataset:
         image = cv2.imread(image_path, mode)
         if image is None:
             raise FileNotFoundError(f"Image at {image_path} could not be loaded.")
-        if self.downsampling != 1.0:
+        if self.downsampling > 0.0 and self.downsampling != 1.0:
             image = cv2.resize(
                 image,
                 (0, 0),
