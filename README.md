@@ -88,25 +88,6 @@ pip install -r requirements.txt
 </details>
 
 <details>
-<summary>Installing CUDA within a Conda Environment</summary>
-If <code>nvcc --version</code> returns an error, you can install CUDA within your Conda environment. 
-After activating your environment and before installing PyTorch, run:
-<pre><code>conda install nvidia/label/cuda-12.8.0::cuda-nvcc
-</code></pre>
-Make sure to replace <code>12.8.0</code> with a version supported by your driver (check maximum version with <code>nvidia-smi</code>). A list of the available versions can be found <a href="https://anaconda.org/nvidia/cuda-nvcc">here</a>.
-</details>
-
-<details>
-<summary>Specifying Environment Path</summary>
-You can specify paths for Conda to save space on your system drive:
-<pre><code>conda config --add pkgs_dirs &lt;pkg_path&gt;
-conda create python=3.12 -y --prefix &lt;env_path&gt;/onthefly_nvs
-conda activate &lt;env_path&gt;/onthefly_nvs
-</code></pre>
-Where <code>&lt;pkg_path&gt;</code> is the desired package download location and <code>&lt;env_path&gt;/onthefly_nvs</code> is the desired environment location.
-</details>
-
-<details>
 <summary>Docker-Based Setup</summary>
 You can build with Docker which reduces the discrepencies between systems and standarizes it into one container.
 
@@ -144,6 +125,25 @@ cd projects/on-the-fly-nvs
 ```
 
 Enjoy using the project as if it was on your local machine!
+</details>
+
+<details>
+<summary>Installing CUDA within a Conda Environment</summary>
+If <code>nvcc --version</code> returns an error, you can install CUDA within your Conda environment. 
+After activating your environment and before installing PyTorch, run:
+<pre><code>conda install nvidia/label/cuda-12.8.0::cuda-nvcc
+</code></pre>
+Make sure to replace <code>12.8.0</code> with a version supported by your driver (check maximum version with <code>nvidia-smi</code>). A list of the available versions can be found <a href="https://anaconda.org/nvidia/cuda-nvcc">here</a>.
+</details>
+
+<details>
+<summary>Specifying Environment Path</summary>
+You can specify paths for Conda to save space on your system drive:
+<pre><code>conda config --add pkgs_dirs &lt;pkg_path&gt;
+conda create python=3.12 -y --prefix &lt;env_path&gt;/onthefly_nvs
+conda activate &lt;env_path&gt;/onthefly_nvs
+</code></pre>
+Where <code>&lt;pkg_path&gt;</code> is the desired package download location and <code>&lt;env_path&gt;/onthefly_nvs</code> is the desired environment location.
 </details>
 
 
