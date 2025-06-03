@@ -255,7 +255,6 @@ if __name__ == "__main__":
                         depth_estimator,
                         triangulator,
                         args,
-                        prev_keyframe,
                     )
                     scene_model.add_keyframe(keyframe)
                     prev_keyframe = keyframe

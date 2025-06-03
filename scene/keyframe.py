@@ -39,7 +39,6 @@ class Keyframe:
         depth_estimator: MonoDepthEstimator,
         triangulator: Triangulator,
         args: Namespace,
-        prev_kf: Keyframe = None,
         inference_mode: bool = False,
     ):
         self.image_pyr = [image]
@@ -79,11 +78,7 @@ class Keyframe:
         # Optimizable parameters
         self.rW2C = torch.nn.Parameter(Rt[:3, :2].clone())
         self.tW2C = torch.nn.Parameter(Rt[:3, 3].clone())
-        exposure = (
-            torch.eye(3, 4, device="cuda")
-            if prev_kf is None
-            else prev_kf.exposure.clone().detach()
-        )
+        exposure = torch.eye(3, 4, device="cuda")
         self.exposure = torch.nn.Parameter(exposure)
         self.depth_scale = torch.nn.Parameter(torch.ones(1, device="cuda"))
         self.depth_offset = torch.nn.Parameter(torch.zeros(1, device="cuda"))
