@@ -1,5 +1,4 @@
 FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
-LABEL maintainer="Shady Gmira <shady.gmira@gmail.com>"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -24,11 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # --- Python requirements
 COPY ./docker/requirements-docker.txt requirements.txt
+COPY ./submodules submodules
+
 RUN pip install --no-cache-dir --break-system-packages torch torchvision xformers --index-url https://download.pytorch.org/whl/cu128
 RUN pip install --no-cache-dir --break-system-packages cupy-cuda12x
+
 # Modify this line to match your GPU Architecture
 ENV TORCH_CUDA_ARCH_LIST="8.6" 
-COPY ./submodules submodules
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed -r requirements.txt
 
 # --- User Setup
