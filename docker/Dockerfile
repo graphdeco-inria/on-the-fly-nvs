@@ -28,7 +28,7 @@ COPY ./submodules submodules
 RUN pip install --no-cache-dir --break-system-packages torch torchvision xformers --index-url https://download.pytorch.org/whl/cu128
 RUN pip install --no-cache-dir --break-system-packages cupy-cuda12x
 
-# Modify this line to match your GPU Architecture
+# === IMPORTANT: Set this to match your GPU Architecture ===
 ENV TORCH_CUDA_ARCH_LIST="8.6" 
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed -r requirements.txt
 
@@ -67,6 +67,7 @@ echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # --- Include this last to avoid cache invalidation
 WORKDIR /
+
 # No clue why this is needed, but it is
 # Otherwise, build of submodules/diff-gaussian-rasterization fails
 RUN sed -i '1i#include <stdint.h>\n#include <cstdint>' submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.h

@@ -110,7 +110,7 @@ Where <code>&lt;pkg_path&gt;</code> is the desired package download location and
 <summary>Docker-Based Setup</summary>
 You can build with Docker which reduces the discrepencies between systems and standarizes it into one container.
 
-Before running Docker, ensure you have installed:
+If you are on a Linux-based setup, ensure you have installed:
 
 <pre><code>sudo apt-get install -y nvidia-container-toolkit</code></pre>
 
