@@ -96,7 +96,8 @@ class SceneModel:
             self.init_proba_scaler = args.init_proba_scaler
             self.max_active_keyframes = args.max_active_keyframes
             self.use_last_frame_proba = args.use_last_frame_proba
-            self.num_active_frames_cpu = 0
+            self.active_frames_cpu = []
+            self.active_frames_gpu = []
             self.guided_mvs = GuidedMVS(args)
             self.lr_dict = {
                 "xyz": {
@@ -260,14 +261,6 @@ class SceneModel:
     def n_active_keyframes(self):
         return self.last_active_frame - self.first_active_frame + 1
 
-    def get_training_id(self):
-        while True:
-            keyframe_id = np.random.randint(
-                self.first_active_frame, self.last_active_frame + 1
-            )
-            if self.keyframes[keyframe_id].device.type == "cuda":
-                return keyframe_id
-
     def optimization_step(self, finetuning=False):
         if len(self.xyz) == 0:
             return
@@ -278,7 +271,7 @@ class SceneModel:
             or self.last_trained_id == -1
             or finetuning
         ):
-            keyframe_id = self.get_training_id()
+            keyframe_id = np.random.choice(self.active_frames_gpu)
         else:
             keyframe_id = -1
         keyframe = self.keyframes[keyframe_id]
@@ -826,6 +819,21 @@ class SceneModel:
             .cuda()
         )
 
+    def move_rand_keyframe_to_cpu(self):
+        """Move a random keyframe to CPU memory"""
+        frame_id = np.random.choice(self.active_frames_gpu[:-self.n_kept_frames])
+        self.keyframes[frame_id].to("cpu")
+        self.active_frames_cpu.append(frame_id)
+        self.active_frames_gpu.remove(frame_id) 
+
+    def move_rand_keyframe_to_gpu(self):
+        """Move a random keyframe to GPU memory"""
+        if len(self.active_frames_cpu) > 0:
+            frame_id = np.random.choice(self.active_frames_cpu)
+            self.keyframes[frame_id].to("cuda")
+            self.active_frames_gpu.insert(0, frame_id)
+            self.active_frames_cpu.remove(frame_id) 
+
     def add_keyframe(self, keyframe: Keyframe, f=None):
         """Add a keyframe to the scene, add and prune Gaussians"""
 
@@ -872,23 +880,18 @@ class SceneModel:
         if not self.inference_mode:
             ## Add keyframe to the active anchor
             self.active_anchor.add_keyframe(keyframe)
+            self.active_frames_gpu.append(keyframe.index)
 
             ## Clear memory if there are many keyframes
-            if (
-                self.n_active_keyframes - self.num_active_frames_cpu
-                > self.max_active_keyframes
-            ):
-                while True:
-                    frame_id = np.random.randint(
-                        self.first_active_frame, self.last_active_frame - 20
-                    )
-                    if self.keyframes[frame_id].device.type == "cuda":
-                        self.keyframes[frame_id].to("cpu")
-                        self.num_active_frames_cpu += 1
-                        if self.num_active_frames_cpu % 10 == 0:
-                            gc.collect()
-                            torch.cuda.empty_cache()
-                        break
+            if len(self.active_frames_gpu) > self.max_active_keyframes:
+                self.move_rand_keyframe_to_cpu()
+                # Reshuffle the active keyframes and clear cache
+                if len(self.active_frames_cpu) % 5 == 0:
+                    self.move_rand_keyframe_to_cpu()
+                    self.move_rand_keyframe_to_gpu()
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
     def enable_inference_mode(self):
         """Enable inference mode and sets the anchor position to the mean of the active keyframes."""
@@ -929,7 +932,6 @@ class SceneModel:
                     small_mask = screen_size < 1.5
                     # Update anchor positions using the camera poses used to optimize it
                     self.update_anchor(self.n_kept_frames)
-                    self.num_active_frames_cpu = 0
 
                     ## Merge fine Gaussians for the current active set
                     # Select a subset and get their nearest neighbours for merging
@@ -976,6 +978,8 @@ class SceneModel:
                         self.keyframes[-self.n_kept_frames :],
                     )
                     self.anchors.append(self.active_anchor)
+                    self.active_frames_gpu = [kf.index for kf in self.active_anchor.keyframes]
+                    self.active_frames_cpu = []
 
                     # Visualization
                     self.anchor_weights = np.zeros(len(self.anchors))

@@ -24,7 +24,7 @@ def get_args():
                         help="If set, source_path/masks_dir is the path to optional masks to apply to the images before computing loss (png).")
     parser.add_argument('--num_loader_threads', type=int, default=4,
                         help="Number of workers to load and prepare input images")
-    parser.add_argument('--downsampling', type=float, default=1.0, help="Downsampling ratio for input images")
+    parser.add_argument('--downsampling', type=float, default=-1.0, help="Downsampling ratio for input images")
     parser.add_argument('--pyr_levels', type=int, default=2,
                         help="Number of pyramid levels. Each level l will downsample the image 2^l times in width and height")
     parser.add_argument('--min_displacement', type=float, default=0.03,
@@ -110,7 +110,7 @@ def get_args():
                         help="Size of the overlapping regions when blending between anchors")
 
     ## Keyframe management
-    parser.add_argument('--max_active_keyframes', type=int, default=400,
+    parser.add_argument('--max_active_keyframes', type=int, default=200,
                         help="Maximum number of keyframes to keep in GPU memory. Will start offloading keyframes to CPU if this number is exceeded.")
 
     ## Evaluation
