@@ -109,22 +109,23 @@ Where <code>&lt;pkg_path&gt;</code> is the desired package download location and
 <details>
 <summary>Docker-Based Setup</summary>
 You can build with Docker which reduces the discrepencies between systems and standarizes it into one container.
+
 Before running Docker, ensure you have installed:
 
 <pre><code>sudo apt-get install -y nvidia-container-toolkit</code></pre>
 
-If you come accross any issue, follow the instructions under the <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html">official NVIDIA Guide</a>
+If you come accross any issue, follow the instructions under the <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html">official NVIDIA Guide.</a>
 
 Then, to build and run the Docker container:
 ```bash
-cd docker
+cd docker # Execute this from the root directory of the project
 ./run_docker.sh -h    # Display help and usage instructions
 ./run_docker.sh -bu   # Build the Docker image and launch the container with docker-compose
 ```
 
 ### Additional Docker Notes
 
-Additionally, ensure you specify your GPU architecture under the `TORCH_CUDA_ARCH_LIST` variable in the Dockerfile. This is necessary for proper compilation of CUDA-based libraries. For example, if your GPU architecture is 8.6, update the Dockerfile as follows:
+> Ensure you specify your GPU architecture under the `TORCH_CUDA_ARCH_LIST` variable in the Dockerfile. This is necessary for proper compilation of CUDA-based libraries. For example, if your GPU architecture is 8.6, update the Dockerfile as follows:
 
 ```dockerfile
 ENV TORCH_CUDA_ARCH_LIST="8.6"
