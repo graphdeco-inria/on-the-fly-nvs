@@ -88,6 +88,46 @@ pip install -r requirements.txt
 </details>
 
 <details>
+<summary>Docker-Based Setup</summary>
+You can build with Docker which reduces the discrepencies between systems and standarizes it into one container.
+
+If you are on a Debian-based setup (Ubuntu, Debian, etc...), ensure you have installed:
+
+<pre><code>sudo apt-get install -y nvidia-container-toolkit</code></pre>
+If you come accross any issue, follow the instructions under the <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html">official NVIDIA Guide.</a>
+
+If you are on a Windows-based setup, follow these <a href="https://docs.docker.com/desktop/features/gpu/">instuctions</a> to use your NVIDIA GPU in Docker.
+
+
+Then, to build and run the Docker container:
+```bash
+cd docker # Execute this from the root directory of the project
+./run_docker.sh -h    # Display help and usage instructions
+./run_docker.sh -bu   # Build the Docker image and launch the container with docker-compose
+```
+
+### Additional Docker Notes
+
+> Ensure you specify your GPU architecture under the `TORCH_CUDA_ARCH_LIST` variable in the Dockerfile. This is necessary for proper and optimized compilation of CUDA-based libraries. For example, if your GPU architecture is 8.6, update the Dockerfile as follows:
+
+```dockerfile
+ENV TORCH_CUDA_ARCH_LIST="8.6"
+```
+
+Refer to [NVIDIA's CUDA GPU support matrix](https://developer.nvidia.com/cuda-gpus) to find the correct architecture for your GPU.
+
+#### Accessing the Project Inside the Container
+
+After starting the Docker container, navigate to the project directory inside the container:
+
+```bash
+cd projects/on-the-fly-nvs
+```
+
+Enjoy using the project as if it was on your local machine!
+</details>
+
+<details>
 <summary>Installing CUDA within a Conda Environment</summary>
 If <code>nvcc --version</code> returns an error, you can install CUDA within your Conda environment. 
 After activating your environment and before installing PyTorch, run:
@@ -105,6 +145,7 @@ conda activate &lt;env_path&gt;/onthefly_nvs
 </code></pre>
 Where <code>&lt;pkg_path&gt;</code> is the desired package download location and <code>&lt;env_path&gt;/onthefly_nvs</code> is the desired environment location.
 </details>
+
 
 ## Data Guidelines
 > Please note that our method **is not a drop-in replacement for COLMAP + 3DGS, as it does not reorder images**. We require sequential capture that implies several constraints on the kind of data that can be handled. Please follow the **[Capture Guidelines](#capture-guidelines) for best results on your own data.**
