@@ -28,6 +28,7 @@ class WebViewer:
         self.scene_model = scene_model
         self.state = "stop"
         self.trainer_state = "disconnected"
+        self.last_keyframe = None
     
     def run(self):
         with serve(self.main, self.ip, self.port, max_size=None, compression=None) as server:
@@ -104,7 +105,13 @@ class WebViewer:
                 image = image.clamp(0, 1.0).mul(255).permute(1, 2, 0).byte().detach().cpu().numpy()
 
                 _, buffer = cv2.imencode(".jpg", cv2.cvtColor(image, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 50])
-                websocket.send(buffer.tobytes())
+                websocket.send("0".encode("utf-8") + buffer.tobytes())
+
+                if self.trainer_state == "lost":
+                    image = self.last_keyframe.mul(255).permute(1,2,0).byte().cpu().numpy()
+                    _, buffer = cv2.imencode(".jpg", cv2.cvtColor(image, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    websocket.send("1".encode("utf-8") + buffer.tobytes())
+
             except ConnectionClosed:
                 print("Client disconnected.")
                 self.num_clients -= 1

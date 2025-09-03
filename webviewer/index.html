@@ -110,6 +110,16 @@
             background-color: #888;
             cursor: not-allowed;
         }
+
+        .lost_img {
+            width: 30vw;
+            height: 30vh;
+            position: absolute;
+            left: 35vw;
+            top: 35vh;
+            z-index: -1;
+            opacity: 0;
+        }
     </style>
 </head>
 <body>
@@ -124,6 +134,10 @@
         <p id="statusText">Status: <span id="statusValue">Disconnected</span></p>
     </div>
     <canvas id="canvas" style="width: 100vw; height: 100vh"></canvas>
+    <div id="lostDiag" class="lost_img">
+        <p style="background-color: red; color: white;">Tracking failed! Go back to the region with last keyframe (below).</p>
+        <img id="lostImg" style="height: 100%; width: 100%"></img>
+    </div>
 
     <script type="module">
         import * as THREE from 'three';
@@ -200,6 +214,8 @@
         const snap = document.getElementById('snap');
         const statusValue = document.getElementById('statusValue');
         const canvas = document.getElementById('canvas');
+        const lostImg = document.getElementById("lostImg");
+        const lostDiag = document.getElementById("lostDiag");
         
         const renderer = new THREE.WebGLRenderer({ canvas });
         
@@ -232,20 +248,33 @@
                 finishBtn.disabled = false;
             };
 
-            ws.onmessage = (event) => {
+            ws.onmessage = async (event) => {
                 let data = event.data;
                 if (data instanceof Blob) {
-                    const url = URL.createObjectURL(data);
-                    loader.load(url, (texture) => {texture.colorSpace = THREE.SRGBColorSpace; scene.background = texture;});
+                    const type = await data.slice(0,1).text();
+                    if (type === "0") {
+                        const url = URL.createObjectURL(data.slice(1));
+                        loader.load(url, (texture) => {texture.colorSpace = THREE.SRGBColorSpace; scene.background = texture;});
+                    } else {
+                        lostImg.src = URL.createObjectURL(data.slice(1))
+                    }
                 } else {
                     let data = JSON.parse(event.data);
                     if (data.trainer_state === "running") {
                         statusValue.innerText = state === 'start' ? 'Running' : 'Paused';
+                        lostDiag.style.opacity = 0;
+                        lostDiag.style.zIndex = 1;
                     } else if (data.trainer_state === "finish") {
                         statusValue.innerText = "Finished";
                         startBtn.disabled = true;
                         stopBtn.disabled = true;
                         finishBtn.disabled = true;
+                        lostDiag.style.opacity = 0;
+                        lostDiag.style.zIndex = -1;
+                    } else if (data.trainer_state === "lost") {
+                        statusValue.innerText = 'Lost';
+                        lostDiag.style.opacity = 1;
+                        lostDiag.style.zIndex = 10;
                     }
                     
                     // Set updated bounds

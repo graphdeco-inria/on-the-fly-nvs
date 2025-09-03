@@ -101,12 +101,12 @@ if __name__ == "__main__":
     print(f"Starting reconstruction for {args.source_path}")
     pbar = tqdm(range(0, len(dataset)))
     reconstruction_start_time = time.time()
+    if args.viewer_mode == "web":
+        viewer.trainer_state = "running"
     for frameID in pbar:
         start_time = time.time()
 
         if args.viewer_mode == "web":
-            viewer.trainer_state = "running"
-
             # Paused
             while viewer.state == "stop":
                 pbar.set_postfix_str(
@@ -270,8 +270,13 @@ if __name__ == "__main__":
                     else:
                         scene_model.optimization_loop(args.num_iterations)
                     increment_runtime(runtimes["Opt"], start_time)
+                    viewer.trainer_state = "running"
                 else:
                     should_add_keyframe = False
+                    if args.viewer_mode == "web":
+                        viewer.last_keyframe = scene_model.keyframes[-1].image_pyr[0]
+                        viewer.trainer_state = "lost"
+                    time.sleep(2)
 
         if should_add_keyframe:
             ## Check if anchor creation is needed based on the primitives' size 
