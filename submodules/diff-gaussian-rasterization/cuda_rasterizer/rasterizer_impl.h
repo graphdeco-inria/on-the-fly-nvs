@@ -3,14 +3,15 @@
  * GRAPHDECO research group, https://team.inria.fr/graphdeco
  * All rights reserved.
  *
- * This software is free for non-commercial, research and evaluation use 
+ * This software is free for non-commercial, research and evaluation use
  * under the terms of the LICENSE.md file.
  *
  * For inquiries contact  george.drettakis@inria.fr
  */
 
 #pragma once
-
+#include <cstdint>   // defines uint32_t, uint64_t, std::uintptr_t, etc.
+#include <cstddef>
 #include <iostream>
 #include <vector>
 #include "rasterizer.h"
@@ -88,7 +89,7 @@ namespace CudaRasterizer
 		static SampleState fromChunk(char*& chunk, size_t C);
 	};
 
-	template<typename T> 
+	template<typename T>
 	size_t required(size_t P)
 	{
 		char* size = nullptr;
