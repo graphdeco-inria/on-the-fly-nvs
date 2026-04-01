@@ -87,7 +87,13 @@ COPY . .
 # --no-build-isolation: setup.py imports torch at the top level, so it must
 # run in the same environment where torch is already installed, not in pip's
 # isolated build env.
-ENV MAX_JOBS=4
+#
+# TORCH_CUDA_ARCH_LIST: build-time container has no GPU, so torch cannot
+# auto-detect architectures and raises "IndexError: list index out of range".
+# Explicit list covers Turing(7.5) / Ampere(8.0,8.6) / Ada(8.9) / Hopper(9.0).
+# The compiled .so runs on the actual GPU at container start time.
+ENV MAX_JOBS=4 \
+    TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0"
 RUN pip install --no-cache-dir --no-build-isolation submodules/diff-gaussian-rasterization
 RUN pip install --no-cache-dir --no-build-isolation submodules/fused-ssim
 RUN pip install --no-cache-dir --no-build-isolation submodules/simple-knn
