@@ -1,8 +1,7 @@
 # On-the-fly NVS - Docker Image
 # Requires NVIDIA GPU with CUDA 12.x driver support (nvidia-smi should show CUDA 12.x)
 # Build: docker build -t on-the-fly-nvs .
-# Submodules must be initialized before building:
-#   git submodule update --init --recursive
+# Submodules are auto-cloned at build time if not locally initialized.
 
 FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
 
@@ -80,8 +79,25 @@ RUN pip install --no-cache-dir \
     lpips \
     websockets
 
-# ── Copy source (submodules must be initialized locally first) ─────────────────
+# ── Copy source ───────────────────────────────────────────────────────────────
 COPY . .
+
+# ── Ensure submodules are present (auto-clone if local init was skipped) ───────
+# Checks a sentinel file in each submodule; clones at the pinned commit SHA
+# if the directory is empty. Safe to run when submodules are already populated.
+RUN git config --global --add safe.directory /app && \
+    if [ ! -f submodules/fused-ssim/setup.py ]; then \
+        git clone https://github.com/rahul-goel/fused-ssim submodules/fused-ssim && \
+        git -C submodules/fused-ssim checkout 8bdb59feb7b9a41b1fab625907cb21f5417deaac; \
+    fi && \
+    if [ ! -f submodules/graphdecoviewer/pyproject.toml ]; then \
+        git clone https://github.com/graphdeco-inria/graphdecoviewer.git submodules/graphdecoviewer && \
+        git -C submodules/graphdecoviewer checkout ae889ccdf47df76d039b455acf6f443077eb0f06; \
+    fi && \
+    if [ ! -f submodules/Depth-Anything-V2/README.md ]; then \
+        git clone https://github.com/DepthAnything/Depth-Anything-V2.git submodules/Depth-Anything-V2 && \
+        git -C submodules/Depth-Anything-V2 checkout e5a2732d3ea2cddc081d7bfd708fc0bf09f812f1; \
+    fi
 
 # ── Build custom CUDA extensions ───────────────────────────────────────────────
 # --no-build-isolation: setup.py imports torch at the top level, so it must
