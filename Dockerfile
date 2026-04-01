@@ -84,10 +84,13 @@ RUN pip install --no-cache-dir \
 COPY . .
 
 # ── Build custom CUDA extensions ───────────────────────────────────────────────
+# --no-build-isolation: setup.py imports torch at the top level, so it must
+# run in the same environment where torch is already installed, not in pip's
+# isolated build env.
 ENV MAX_JOBS=4
-RUN pip install --no-cache-dir submodules/diff-gaussian-rasterization
-RUN pip install --no-cache-dir submodules/fused-ssim
-RUN pip install --no-cache-dir submodules/simple-knn
+RUN pip install --no-cache-dir --no-build-isolation submodules/diff-gaussian-rasterization
+RUN pip install --no-cache-dir --no-build-isolation submodules/fused-ssim
+RUN pip install --no-cache-dir --no-build-isolation submodules/simple-knn
 RUN pip install --no-cache-dir submodules/graphdecoviewer
 
 # ── Cache volume mount points ──────────────────────────────────────────────────
