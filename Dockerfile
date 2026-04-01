@@ -93,7 +93,9 @@ COPY . .
 # Explicit list covers Turing(7.5) / Ampere(8.0,8.6) / Ada(8.9) / Hopper(9.0).
 # The compiled .so runs on the actual GPU at container start time.
 ENV MAX_JOBS=4 \
-    TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0"
+    # A40 = Ampere sm_86; single-arch build is significantly faster.
+    # Change to "7.5;8.0;8.6;8.9;9.0" for a portable multi-GPU image.
+    TORCH_CUDA_ARCH_LIST="8.6"
 RUN pip install --no-cache-dir --no-build-isolation submodules/diff-gaussian-rasterization
 RUN pip install --no-cache-dir --no-build-isolation submodules/fused-ssim
 RUN pip install --no-cache-dir --no-build-isolation submodules/simple-knn
