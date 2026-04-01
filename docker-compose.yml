@@ -1,16 +1,12 @@
 services:
 
   # ── Tailscale sidecar ────────────────────────────────────────────────────────
-  # Provides a Tailscale IP that iPhone can reach over any network.
-  # Set TS_AUTHKEY in .env or environment before starting.
-  # Get an auth key at: https://login.tailscale.com/admin/settings/keys
   tailscale:
     image: tailscale/tailscale:latest
     hostname: ${TS_HOSTNAME:-on-the-fly-nvs}
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY:?TS_AUTHKEY is required. Get one at https://login.tailscale.com/admin/settings/keys}
       - TS_STATE_DIR=/var/lib/tailscale
-      # Advertise this node as a regular peer (no exit node / subnet routing needed)
       - TS_EXTRA_ARGS=--accept-routes
     volumes:
       - tailscale_state:/var/lib/tailscale
@@ -18,6 +14,13 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
+    ports:
+      # SSH — mapped to 2222 on host to avoid conflicts with host sshd
+      - "2222:22"
+      # WebSocket viewer
+      - "6009:6009"
+      # HTTP viewer (http://<host>:8000/webviewer)
+      - "8000:8000"
     restart: unless-stopped
 
   # ── on-the-fly NVS server ────────────────────────────────────────────────────
@@ -25,29 +28,24 @@ services:
     build: .
     image: on-the-fly-nvs:latest
     runtime: nvidia
-    # Share Tailscale container's network: ports 6009 and 8000 are reachable
-    # at the Tailscale IP of this machine from the iPhone.
+    # Shares Tailscale container's network namespace — ports above are accessible
+    # via both the host IP and the Tailscale IP of this machine.
     network_mode: "service:tailscale"
     depends_on:
       - tailscale
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
-      # iPhone stream URL — use Tailscale IP of the phone if on different networks,
-      # or LAN IP if on the same Wi-Fi.
-      # Example (LAN):       http://192.168.1.100:8080/video
-      # Example (Tailscale): http://100.x.x.x:8080/video
+      # iPhone stream URL (LAN or Tailscale IP)
       - STREAM_URL=${STREAM_URL:-}
       - MODEL_PATH=${MODEL_PATH:-/app/results}
+      # SSH public key injected at container start — or mount authorized_keys below
+      - SSH_PUBLIC_KEY=${SSH_PUBLIC_KEY:-}
     volumes:
       - model_cache:/cache
       - ./results:/app/results
-    # command: >
-    #   python train.py
-    #     -s ${STREAM_URL}
-    #     --downsampling 1.5
-    #     --viewer_mode web
-    #     -m /app/results/scene_01
+      # Optional: mount authorized_keys directly instead of using SSH_PUBLIC_KEY env
+      # - ~/.ssh/authorized_keys:/root/.ssh/authorized_keys:ro
     deploy:
       resources:
         reservations:

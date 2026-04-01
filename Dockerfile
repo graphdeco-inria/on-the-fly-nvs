@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
     ninja-build \
+    openssh-server \
     # OpenCV runtime deps
     libgl1-mesa-glx \
     libglib2.0-0 \
@@ -120,10 +121,24 @@ RUN pip install --no-cache-dir submodules/graphdecoviewer
 # ── Cache volume mount points ──────────────────────────────────────────────────
 RUN mkdir -p /cache/huggingface /cache/torch /app/results /app/data
 
-EXPOSE 6009 8000
+# ── SSH configuration ──────────────────────────────────────────────────────────
+RUN mkdir -p /run/sshd /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    # Allow root login via key only; disable password auth
+    sed -i \
+        -e 's|#PermitRootLogin.*|PermitRootLogin prohibit-password|' \
+        -e 's|#PasswordAuthentication.*|PasswordAuthentication no|' \
+        -e 's|#PubkeyAuthentication.*|PubkeyAuthentication yes|' \
+        /etc/ssh/sshd_config
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 22 6009 8000
 
 ENV STREAM_URL=""
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["sh", "-c", \
     "python train.py \
         -s ${STREAM_URL} \
