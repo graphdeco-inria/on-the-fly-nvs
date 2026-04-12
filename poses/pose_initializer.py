@@ -382,13 +382,17 @@ class PoseInitializer():
     ):
         """Rig-aware incremental pose using method A from TODO §3.3.2.
 
-        Each view is matched independently against the shared set of previous
-        keyframes; per-view 2D-3D correspondences are fed to
-        `rig_pnp_per_view`, which lifts each view's PnP to a rig pose candidate
-        and averages them on SE(3).
+        Each view is matched independently against the previous keyframes;
+        per-view 2D-3D correspondences are fed to `rig_pnp_per_view`, which
+        lifts each view's PnP to a rig pose candidate and averages them on
+        SE(3) with an IRLS Huber kernel.
 
         Args:
-            keyframes: list of previous Keyframes (selected by scene_model).
+            keyframes: either a flat list of previous Keyframes (all views
+                share the same candidate pool), or a dict
+                {view_name: list[Keyframe]} where each view has its own pool.
+                The dict form is preferred when the camera is turning — each
+                view picks keyframes that best match its own orientation.
             desc_kpts_per_view: dict {view_name: DescribedKeypoints}.
             view_indices: dict {view_name: int} — kID used by the matcher so
                 that match dicts stay disjoint per view.
@@ -396,11 +400,17 @@ class PoseInitializer():
 
         Returns: (rig_w2c 4x4 Tensor or None, per-view stats dict).
         """
+        # Normalize keyframes argument to a dict.
+        if isinstance(keyframes, dict):
+            keyframes_per_view = keyframes
+        else:
+            keyframes_per_view = {v: keyframes for v in desc_kpts_per_view}
+
         correspondences = {}
         for view_name, curr_desc_kpts in desc_kpts_per_view.items():
             xyz_list, uv_list, conf_list = [], [], []
             my_idx = view_indices[view_name]
-            for keyframe in keyframes:
+            for keyframe in keyframes_per_view[view_name]:
                 matches = self.matcher(
                     curr_desc_kpts, keyframe.desc_kpts,
                     remove_outliers=True, update_kpts_flag="all",
@@ -441,7 +451,7 @@ class PoseInitializer():
 
         if rig_pose is None:
             for view_name, my_idx in view_indices.items():
-                for keyframe in keyframes:
+                for keyframe in keyframes_per_view[view_name]:
                     keyframe.desc_kpts.matches.pop(my_idx, None)
             return None, stats
         return rig_pose, stats

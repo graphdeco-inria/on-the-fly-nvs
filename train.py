@@ -225,18 +225,23 @@ if __name__ == "__main__":
 
             # --- Rig-incremental (post-bootstrap) ---
             start_time = time.time()
-            ref_img, ref_info, ref_desc = rig_batch[dataset.ref_view]
-            prev_keyframes = scene_model.get_prev_keyframes(
-                args.num_prev_keyframes_miniba_incr, True, ref_desc
-            )
-            increment_runtime(runtimes["tri"], start_time)
-
             view_indices = {v: n_keyframes + i for i, v in enumerate(view_order)}
             desc_per_view = {v: rig_batch[v][2] for v in view_order}
+            # Per-view prev_keyframes: each view picks its own candidate pool
+            # based on its own features. Critical for U-turn handling, where
+            # a single view's best prev frames are very different from ref's.
+            # update_3dpts=True only on the first call to avoid redundant
+            # triangulation across the 9 per-view queries.
+            prev_per_view = {}
+            for i, v in enumerate(view_order):
+                prev_per_view[v] = scene_model.get_prev_keyframes(
+                    args.num_prev_keyframes_miniba_incr, i == 0, desc_per_view[v],
+                )
+            increment_runtime(runtimes["tri"], start_time)
 
             start_time = time.time()
             rig_pose, _ = pose_initializer.initialize_incremental_rig(
-                prev_keyframes, desc_per_view, view_indices, dataset.rig,
+                prev_per_view, desc_per_view, view_indices, dataset.rig,
             )
             increment_runtime(runtimes["BAI"], start_time)
             if rig_pose is None:

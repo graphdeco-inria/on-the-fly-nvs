@@ -13,7 +13,7 @@ import torch
 from torch import Tensor
 
 from rig.rig_loader import RigConfig
-from rig.se3_utils import se3_weighted_mean
+from rig.se3_utils import se3_robust_mean
 
 
 def _to_numpy(x):
@@ -79,5 +79,11 @@ def rig_pnp_per_view(
 
     Ts = torch.stack(rig_candidates, dim=0)
     w = torch.tensor(weights, dtype=torch.float32, device=Ts.device)
-    rig_mean = se3_weighted_mean(Ts, w)
+    rig_mean, eff_w = se3_robust_mean(Ts, w)
+    # Expose the effective (post-Huber) weights so callers can see which
+    # views ended up trusted.
+    view_to_eff_w = {}
+    candidate_views = [v for v, s in stats.items() if s.get("success")]
+    for v, ew in zip(candidate_views, eff_w.tolist()):
+        stats[v]["effective_weight"] = float(ew)
     return rig_mean, stats

@@ -112,3 +112,41 @@ def se3_weighted_mean(Ts: Tensor, weights: Tensor, iters: int = 3) -> Tensor:
             break
         T_mean = T_mean @ se3_exp(xi_mean)
     return T_mean
+
+
+def se3_robust_mean(Ts: Tensor, weights: Tensor, iters: int = 8,
+                    huber_c: float = 0.3) -> Tensor:
+    """Iteratively reweighted (IRLS) Fréchet mean with Huber kernel.
+
+    Candidates whose distance in se(3) tangent space from the current mean
+    exceeds `huber_c` get down-weighted by `huber_c / dist`, so a few corrupt
+    rig-pose candidates cannot dominate the average.
+
+    Returns a pair (T_mean, effective_weights) so callers can inspect which
+    candidates were trusted.
+    """
+    assert Ts.dim() == 3 and Ts.shape[-2:] == (4, 4)
+    base_w = weights.to(Ts)
+    base_w = base_w / base_w.sum().clamp(min=_EPS)
+    ref_idx = int(torch.argmax(weights).item())
+    T_mean = Ts[ref_idx].clone()
+    eff_w = base_w.clone()
+    for _ in range(iters):
+        T_mean_inv = torch.linalg.inv(T_mean)
+        delta = T_mean_inv.unsqueeze(0) @ Ts
+        xi = se3_log(delta)                     # (N, 6)
+        # Distance metric: rotation in radians + translation (both in
+        # tangent space units; fine for Huber bookkeeping).
+        dist = xi.norm(dim=-1)                   # (N,)
+        huber = torch.where(
+            dist <= huber_c,
+            torch.ones_like(dist),
+            huber_c / dist.clamp(min=_EPS),
+        )
+        eff_w = base_w * huber
+        eff_w = eff_w / eff_w.sum().clamp(min=_EPS)
+        xi_mean = (eff_w.unsqueeze(-1) * xi).sum(dim=0)
+        if xi_mean.abs().max() < 1e-8:
+            break
+        T_mean = T_mean @ se3_exp(xi_mean)
+    return T_mean, eff_w
