@@ -21,6 +21,7 @@ from http.server import SimpleHTTPRequestHandler
 from args import get_args
 from threading import Thread
 from dataloaders.image_dataset import ImageDataset
+from dataloaders.rig_image_dataset import RigImageDataset
 from dataloaders.stream_dataset import StreamDataset
 from poses.feature_detector import Detector
 from poses.matcher import Matcher
@@ -46,6 +47,9 @@ if __name__ == "__main__":
     if "://" in args.source_path:
         dataset = StreamDataset(args.source_path, args.downsampling)
         is_stream = True
+    elif args.use_rig:
+        dataset = RigImageDataset(args)
+        is_stream = False
     else:
         dataset = ImageDataset(args)
         is_stream = False
@@ -60,7 +64,8 @@ if __name__ == "__main__":
         args.num_kpts, args.num_prev_keyframes_miniba_incr, max_error
     )
     pose_initializer = PoseInitializer(
-        width, height, triangulator, matcher, 2 * max_error, args
+        width, height, triangulator, matcher, 2 * max_error, args,
+        rig_config=(dataset.rig if args.use_rig else None),
     )
     focal = pose_initializer.f_init
     dense_extractor = DenseExtractor(width, height)
@@ -91,6 +96,13 @@ if __name__ == "__main__":
     needs_reboot = False
     bootstrap_keyframe_dicts = []
     bootstrap_desc_kpts = []
+    # Rig mode (Option A): one 9-view batch per timestep; the first B batches
+    # accumulate for rig bootstrap, then each subsequent batch is handled by
+    # rig-aware incremental PnP. `ref_kf_by_ts[ts]` caches the ref-view keyframe
+    # for debugging / downstream inspection.
+    ref_kf_by_ts = {}
+    bootstrap_rig_data = []
+    n_rig_bootstrap_ts = 0
 
     # Dict of runtimes for each step
     runtimes = ["Load", "BAB", "tri", "BAI", "Add", "Init", "Opt", "anc"]
@@ -99,7 +111,12 @@ if __name__ == "__main__":
 
     ## Scene reconstruction
     print(f"Starting reconstruction for {args.source_path}")
-    pbar = tqdm(range(0, len(dataset)))
+    # In rig mode each loop iteration consumes 9 images (one 9-view batch),
+    # so the tqdm range must be in batches rather than individual images.
+    total_iters = (
+        dataset.num_timesteps if args.use_rig else len(dataset)
+    )
+    pbar = tqdm(range(0, total_iters))
     reconstruction_start_time = time.time()
     for frameID in pbar:
         start_time = time.time()
@@ -119,6 +136,143 @@ if __name__ == "__main__":
                 viewer.trainer_state = "finish"
                 break
         
+        # === Rig mode (Option A): one 9-view batch per timestep ===
+        if args.use_rig:
+            image, info = dataset.getnext()
+            if info["rig_view"] != dataset.ref_view:
+                raise RuntimeError(
+                    "Rig dataset desync: expected a ref-view frame at batch "
+                    f"start, got view={info['rig_view']} ts={info['rig_ts']}"
+                )
+            ts = info["rig_ts"]
+            rig_batch = {dataset.ref_view: (image, info, detector(image))}
+            for _ in range(len(dataset.non_ref_views)):
+                nr_img, nr_info = dataset.getnext()
+                if nr_info["rig_ts"] != ts:
+                    raise RuntimeError(
+                        f"rig batch desync: expected ts={ts}, got ts={nr_info['rig_ts']}"
+                    )
+                rig_batch[nr_info["rig_view"]] = (nr_img, nr_info, detector(nr_img))
+            increment_runtime(runtimes["Load"], start_time)
+
+            B = args.num_keyframes_miniba_bootstrap
+            view_order = list(dataset.rig.view_names)
+
+            if n_rig_bootstrap_ts < B:
+                bootstrap_rig_data.append({"ts": ts, "frames": rig_batch})
+                n_rig_bootstrap_ts += 1
+                if n_rig_bootstrap_ts < B:
+                    continue
+
+                # --- Rig bootstrap: run MiniBARig over B timesteps * 9 views ---
+                start_time = time.time()
+                desc_per_ts_per_view = [
+                    {v: data["frames"][v][2] for v in view_order}
+                    for data in bootstrap_rig_data
+                ]
+                rig_Rts, f_out, res, _xyz, _view_names = (
+                    pose_initializer.initialize_bootstrap_rig(
+                        desc_per_ts_per_view, dataset.rig
+                    )
+                )
+                focal = f_out.cpu().item()
+                increment_runtime(runtimes["BAB"], start_time)
+
+                f_tensor = torch.tensor([focal], device="cuda", dtype=torch.float32)
+                ref_kf_scene_indices = []  # indices (into scene_model.keyframes) of ref keyframes
+                start_time = time.time()
+                for ts_i, data in enumerate(bootstrap_rig_data):
+                    rig_pose = rig_Rts[ts_i]
+                    for v_name in view_order:
+                        img, inf, desc = data["frames"][v_name]
+                        rel = inf["rig_relative_Rt"].to("cuda")
+                        Rt_view = rel @ rig_pose
+                        kf = Keyframe(
+                            img, inf, desc, Rt_view, n_keyframes, f_tensor,
+                            dense_extractor, depth_estimator, triangulator, args,
+                        )
+                        # Push the focal into scene_model on the very first keyframe.
+                        first = (ts_i == 0 and v_name == view_order[0])
+                        scene_model.add_keyframe(kf, f_tensor if first else None)
+                        if v_name == dataset.ref_view:
+                            ref_kf_by_ts[data["ts"]] = kf
+                            ref_kf_scene_indices.append(len(scene_model.keyframes) - 1)
+                        prev_keyframe = kf
+                        n_keyframes += 1
+                increment_runtime(runtimes["Add"], start_time)
+
+                # Gaussian initialization: only on ref-view keyframes (their
+                # desc_kpts have time-axis matches from bootstrap). Non-ref
+                # keyframes just build their depth pyramid from mono depth.
+                start_time = time.time()
+                for kf in scene_model.keyframes:
+                    if kf.info["rig_view"] != dataset.ref_view:
+                        kf.align_depth()
+                for scene_idx in ref_kf_scene_indices:
+                    scene_model.add_new_gaussians(scene_idx)
+                increment_runtime(runtimes["Init"], start_time)
+
+                start_time = time.time()
+                if is_stream:
+                    scene_model.optimize_async(args.num_iterations)
+                else:
+                    scene_model.optimization_loop(args.num_iterations)
+                increment_runtime(runtimes["Opt"], start_time)
+                last_reboot = n_keyframes
+                if args.viewer_mode not in ["none", "web"]:
+                    viewer.reset_intrinsics("point_view")
+                continue
+
+            # --- Rig-incremental (post-bootstrap) ---
+            start_time = time.time()
+            ref_img, ref_info, ref_desc = rig_batch[dataset.ref_view]
+            prev_keyframes = scene_model.get_prev_keyframes(
+                args.num_prev_keyframes_miniba_incr, True, ref_desc
+            )
+            increment_runtime(runtimes["tri"], start_time)
+
+            view_indices = {v: n_keyframes + i for i, v in enumerate(view_order)}
+            desc_per_view = {v: rig_batch[v][2] for v in view_order}
+
+            start_time = time.time()
+            rig_pose, _ = pose_initializer.initialize_incremental_rig(
+                prev_keyframes, desc_per_view, view_indices, dataset.rig,
+            )
+            increment_runtime(runtimes["BAI"], start_time)
+            if rig_pose is None:
+                continue
+
+            f_tensor = torch.tensor([focal], device="cuda", dtype=torch.float32)
+            start_time = time.time()
+            for v_name in view_order:
+                img, inf, desc = rig_batch[v_name]
+                rel = inf["rig_relative_Rt"].to("cuda")
+                Rt_view = rel @ rig_pose
+                kf = Keyframe(
+                    img, inf, desc, Rt_view, n_keyframes, f_tensor,
+                    dense_extractor, depth_estimator, triangulator, args,
+                )
+                scene_model.add_keyframe(kf)
+                prev_keyframe = kf
+                if v_name == dataset.ref_view:
+                    ref_kf_by_ts[ts] = kf
+                    scene_model.add_new_gaussians()
+                else:
+                    kf.align_depth()
+                n_keyframes += 1
+            increment_runtime(runtimes["Add"], start_time)
+            start_time = time.time()
+            if is_stream:
+                scene_model.optimize_async(args.num_iterations)
+            else:
+                scene_model.optimization_loop(args.num_iterations)
+            increment_runtime(runtimes["Opt"], start_time)
+            start_time = time.time()
+            scene_model.place_anchor_if_needed()
+            increment_runtime(runtimes["anc"], start_time)
+            continue
+
+        # === Non-rig path ===
         if n_keyframes == 0:
             image, info = dataset.getnext()
             prev_desc_kpts = detector(image)
@@ -128,6 +282,7 @@ if __name__ == "__main__":
             continue
 
         image, info = dataset.getnext()
+
         desc_kpts = detector(image)
         # Match features between the previous and current frame
         curr_prev_matches = matcher(desc_kpts, prev_desc_kpts)

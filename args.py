@@ -121,6 +121,14 @@ def get_args():
     parser.add_argument('--display_runtimes', action='store_true', 
                         help="Display runtimes for each step in the tqdm bar")
 
+    ## Rig options (9-view Insta360 X5 rig)
+    parser.add_argument('--use_rig', action='store_true',
+                        help="Enable rig-aware data loading (9 views per timestep)")
+    parser.add_argument('--rig_config', type=str, default="blender_rig.json",
+                        help="Path to rig configuration JSON (Blender-style)")
+    parser.add_argument('--ref_view', type=str, default="High_Cam07",
+                        help="Reference view name for rig; used as Pass 1 (bootstrap + incremental)")
+
     ## Checkpoint options
     parser.add_argument('-m', '--model_path', default="", 
                         help="Directory to store the renders from test view and checkpoints after training. If not set, will be set to results/xxxxxx.")
