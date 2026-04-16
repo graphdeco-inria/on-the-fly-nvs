@@ -15,7 +15,7 @@ import math
 from poses.feature_detector import DescribedKeypoints
 from poses.mini_ba import MiniBA
 from poses.mini_ba_rig import MiniBARig
-from utils import fov2focal, depth2points, sixD2mtx
+from utils import fov2focal, depth2points, sixD2mtx, mtx2sixD
 from scene.keyframe import Keyframe
 from poses.ransac import RANSACEstimator, EstimatorType
 from rig.rig_pnp import rig_pnp_per_view
@@ -74,6 +74,17 @@ class PoseInitializer():
                 optimize_focal=(not args.fix_focal),
                 optimize_3Dpts=True,
                 iters=args.iters_miniba_bootstrap,
+            )
+            # Issue #5 refinement: 1-timestep MiniBARig for per-step rig_pose
+            # refinement after rig_pnp_per_view. Pose-only (3D pts fixed).
+            self._rig_incr_npts = (args.num_pts_miniba_incr // n_views) * n_views
+            self.miniba_incr_rig = MiniBARig(
+                n_ts=1,
+                n_views=n_views,
+                npts=self._rig_incr_npts,
+                optimize_focal=False,
+                optimize_3Dpts=False,
+                iters=args.iters_miniba_incr,
             )
 
     def build_problem(self,
@@ -362,7 +373,8 @@ class PoseInitializer():
 
         # Scale so consecutive rig centers have mean distance 0.1.
         rel_rig_t = rig_t_out[:-1] - rig_t_out[1:]
-        scale = 0.1 / rel_rig_t.norm(dim=-1).mean().clamp_min(1e-6)
+        rel_rig_t_mean = rel_rig_t.norm(dim=-1).mean()
+        scale = 0.1 / rel_rig_t_mean.clamp_min(1e-6)
         rig_t_out = rig_t_out * scale
         xyz_out = xyz_out * scale
 
@@ -454,4 +466,83 @@ class PoseInitializer():
                 for keyframe in keyframes_per_view[view_name]:
                     keyframe.desc_kpts.matches.pop(my_idx, None)
             return None, stats
+
+        # Issue #5: refine rig_pose with 1-timestep MiniBARig LM (pose-only).
+        # Takes PnP+Fréchet mean output as initial guess, tightens it with
+        # full reprojection residual across all 9 views simultaneously.
+        if hasattr(self, "miniba_incr_rig"):
+            try:
+                rig_pose = self._refine_rig_pose_miniba(rig_pose, correspondences, rig_config)
+            except Exception as e:
+                # Refinement is a best-effort tightening; fall back to PnP
+                # result on any numerical hiccup instead of dropping the ts.
+                print(f"rig incr refinement failed ({e}); keeping PnP result")
         return rig_pose, stats
+
+    @torch.no_grad()
+    def _refine_rig_pose_miniba(self, rig_pose_init, correspondences, rig_config):
+        """1-timestep MiniBARig LM refinement of the rig_pose.
+
+        Layout for MiniBARig (n_ts=1): observation buffer is
+        (npts, n_ts=1, n_views, 2) where `-1` means no observation. We fill
+        each view's strip with that view's correspondences.
+        """
+        view_names = list(rig_config.view_names)
+        n_views = len(view_names)
+        npts = self._rig_incr_npts
+        pts_per_view = npts // n_views
+
+        uv = torch.full((npts, 1, n_views, 2), -1.0, device="cuda")
+        xyz = torch.zeros(npts, 3, device="cuda")
+
+        any_obs = False
+        for v_idx, v_name in enumerate(view_names):
+            if v_name not in correspondences:
+                continue
+            uv_v, xyz_v = correspondences[v_name]
+            if uv_v.shape[0] == 0:
+                continue
+            n = min(pts_per_view, uv_v.shape[0])
+            lo = v_idx * pts_per_view
+            uv[lo:lo + n, 0, v_idx, :] = uv_v[:n]
+            xyz[lo:lo + n] = xyz_v[:n]
+            any_obs = True
+        if not any_obs:
+            return rig_pose_init
+
+        R_init = rig_pose_init[:3, :3].contiguous()
+        t_init = rig_pose_init[:3, 3].contiguous()
+        R6D_init = mtx2sixD(R_init.unsqueeze(0))  # (1, 3, 2)
+        t_in = t_init.unsqueeze(0)                # (1, 3)
+
+        rel_R = torch.stack(
+            [rig_config.relative_Rt[v][:3, :3].to("cuda") for v in view_names]
+        )
+        rel_t = torch.stack(
+            [rig_config.relative_Rt[v][:3, 3].to("cuda") for v in view_names]
+        )
+
+        f_t = self.f if isinstance(self.f, torch.Tensor) else torch.tensor(
+            [float(self.f)], device="cuda"
+        )
+        R6D_out, t_out, _, _, r, r_init, mask = self.miniba_incr_rig(
+            R6D_init, t_in, f_t, xyz, rel_R, rel_t, self.centre,
+            uv.reshape(-1).contiguous(),
+        )
+
+        # Sanity: if output has NaNs, or if refinement moved the translation
+        # by an unreasonable amount relative to the PnP initial (e.g. MiniBA
+        # diverged on degenerate inputs), keep the PnP result.
+        if not torch.isfinite(t_out).all() or not torch.isfinite(R6D_out).all():
+            return rig_pose_init
+        t_jump = float((t_out[0] - t_init).norm().item())
+        init_t_norm = float(t_init.norm().item())
+        # Allow refinement to move up to max(0.2, |t_init|)
+        max_jump = max(0.2, init_t_norm * 1.0)
+        if t_jump > max_jump:
+            return rig_pose_init
+
+        rig_pose_out = torch.eye(4, device="cuda")
+        rig_pose_out[:3, :3] = sixD2mtx(R6D_out)[0]
+        rig_pose_out[:3, 3] = t_out[0]
+        return rig_pose_out

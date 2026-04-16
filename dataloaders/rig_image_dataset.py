@@ -71,9 +71,22 @@ class RigImageDataset:
                                    "path": os.path.join(self.images_root, view, fname),
                                    "filename": fname})
 
-        # Optional start_at, applied to the Pass 1 section only (Pass 2 follows Pass 1).
+        # start_at is in *timestep* units for rig mode (vs per-image in the
+        # single-camera dataset). Drop the first N full 9-view batches and
+        # shrink timestep_names accordingly so train.py's
+        # `dataset.num_timesteps` reflects the remaining iterations.
         if args.start_at > 0:
-            self.items = self.items[args.start_at:]
+            n_views_per_batch = len(self.rig.view_names)
+            skip_ts = int(args.start_at)
+            if skip_ts >= self.num_timesteps:
+                raise ValueError(
+                    f"--start_at ({skip_ts}) >= num_timesteps "
+                    f"({self.num_timesteps}); nothing to iterate."
+                )
+            skip_items = skip_ts * n_views_per_batch
+            self.items = self.items[skip_items:]
+            self.timestep_names = self.timestep_names[skip_ts:]
+            self.num_timesteps = len(self.timestep_names)
 
         # Per-item metadata consumed by the training loop.
         self.infos: Dict[str, dict] = {}

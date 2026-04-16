@@ -423,6 +423,19 @@ std::tuple<int,int> CudaRasterizer::Rasterizer::forward(
 	int num_rendered;
 	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 
+	// Early-out: no Gaussian projected into the image. Subsequent kernels
+	// (duplicateWithKeys, CUB SortPairs, identifyTileRanges, render) launch
+	// with zero-sized grids or empty bins and some drivers/CUB versions
+	// return cudaErrorInvalidConfiguration which poisons the CUDA context
+	// for the rest of the process. The output tensors are already
+	// zero-initialized by the caller (RasterizeGaussiansCUDA uses torch::full
+	// with 0.0 for out_color/invdepth/radii/mainGaussID), so we can safely
+	// return without doing any further work.
+	if (num_rendered == 0)
+	{
+		return std::make_tuple(0, 0);
+	}
+
 	size_t binning_chunk_size = required<BinningState>(num_rendered);
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
@@ -540,6 +553,17 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dt,
 	bool debug)
 {
+	// Mirror the forward-side early-out: if no Gaussian produced any tile
+	// instance (R == 0), there is nothing to differentiate. All output
+	// gradient buffers are already zero-initialized by the caller, so we
+	// return immediately before any kernel is launched against an empty
+	// BinningState/SampleState, which would otherwise trigger
+	// cudaErrorInvalidConfiguration and poison the CUDA context.
+	if (R == 0)
+	{
+		return;
+	}
+
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
 	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);

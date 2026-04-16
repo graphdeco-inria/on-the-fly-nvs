@@ -26,10 +26,14 @@ def rig_pnp_per_view(
     K: Tensor,
     min_correspondences: int = 6,
     reproj_error_px: float = 4.0,
+    scene_scale: float = 0.1,
 ) -> Tuple[Optional[Tensor], Dict[str, dict]]:
     """
     correspondences: {view_name: (pts_2d[N,2], pts_3d[N,3])}
     K: (3, 3) camera intrinsic matrix (assumed identical across views).
+    scene_scale: expected translation magnitude between neighboring rig
+        poses. Used by the robust mean's translation Huber threshold so the
+        kernel stays meaningful across different dataset scales.
     Returns: (rig_world2cam 4x4 or None, per_view_stats dict).
     """
     K_np = _to_numpy(K).astype(np.float64)
@@ -79,7 +83,7 @@ def rig_pnp_per_view(
 
     Ts = torch.stack(rig_candidates, dim=0)
     w = torch.tensor(weights, dtype=torch.float32, device=Ts.device)
-    rig_mean, eff_w = se3_robust_mean(Ts, w)
+    rig_mean, eff_w = se3_robust_mean(Ts, w, scene_scale=scene_scale)
     # Expose the effective (post-Huber) weights so callers can see which
     # views ended up trusted.
     view_to_eff_w = {}

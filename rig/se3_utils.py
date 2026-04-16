@@ -114,18 +114,48 @@ def se3_weighted_mean(Ts: Tensor, weights: Tensor, iters: int = 3) -> Tensor:
     return T_mean
 
 
-def se3_robust_mean(Ts: Tensor, weights: Tensor, iters: int = 8,
-                    huber_c: float = 0.3) -> Tensor:
-    """Iteratively reweighted (IRLS) Fréchet mean with Huber kernel.
+def se3_robust_mean(
+    Ts: Tensor,
+    weights: Tensor,
+    iters: int = 8,
+    huber_rot_rad: float = 0.2,
+    huber_trans: float = 0.05,
+    scene_scale: float = 1.0,
+    # Backwards-compat shim: old callers passed `huber_c=0.3`. If provided it
+    # becomes the rotation threshold and translation is scaled to match.
+    huber_c: float = None,
+) -> Tensor:
+    """IRLS Fréchet mean on SE(3) with a *scale-independent* Huber kernel.
 
-    Candidates whose distance in se(3) tangent space from the current mean
-    exceeds `huber_c` get down-weighted by `huber_c / dist`, so a few corrupt
-    rig-pose candidates cannot dominate the average.
+    The previous implementation used `||xi||` where `xi = [ω(rad), u(units)]`,
+    mixing radians and scene units. That threshold was only meaningful when
+    scene translations happened to be comparable to rotation angles.
 
-    Returns a pair (T_mean, effective_weights) so callers can inspect which
-    candidates were trusted.
+    This version treats rotation and translation separately:
+      - `rot_dist    = ||ω||`                 (radians)
+      - `trans_dist  = ||u|| / scene_scale`   (unit-less)
+    and combines them via the tighter Huber weight
+      `w = min(huber(rot_dist, huber_rot_rad),
+               huber(trans_dist, huber_trans))`
+    so either component going rogue triggers down-weighting.
+
+    Args:
+        Ts: (N, 4, 4) candidate transforms.
+        weights: (N,) non-negative prior weights (e.g. PnP inlier counts).
+        iters: IRLS outer iterations.
+        huber_rot_rad: rotation threshold in radians (default ≈11.5°).
+        huber_trans: translation threshold in `scene_scale`-normalized units.
+        scene_scale: expected translation magnitude between neighboring
+            frames (for this repo: bootstrap normalizes to 0.1).
+        huber_c: deprecated single-scalar threshold; if set, used as
+            `huber_rot_rad` and `huber_trans = huber_c * scene_scale`.
+
+    Returns: (T_mean, effective_weights)
     """
     assert Ts.dim() == 3 and Ts.shape[-2:] == (4, 4)
+    if huber_c is not None:
+        huber_rot_rad = float(huber_c)
+        huber_trans = float(huber_c) * float(scene_scale)
     base_w = weights.to(Ts)
     base_w = base_w / base_w.sum().clamp(min=_EPS)
     ref_idx = int(torch.argmax(weights).item())
@@ -134,15 +164,20 @@ def se3_robust_mean(Ts: Tensor, weights: Tensor, iters: int = 8,
     for _ in range(iters):
         T_mean_inv = torch.linalg.inv(T_mean)
         delta = T_mean_inv.unsqueeze(0) @ Ts
-        xi = se3_log(delta)                     # (N, 6)
-        # Distance metric: rotation in radians + translation (both in
-        # tangent space units; fine for Huber bookkeeping).
-        dist = xi.norm(dim=-1)                   # (N,)
-        huber = torch.where(
-            dist <= huber_c,
-            torch.ones_like(dist),
-            huber_c / dist.clamp(min=_EPS),
+        xi = se3_log(delta)                      # (N, 6); [rot(3), trans(3)]
+        rot_dist = xi[..., :3].norm(dim=-1)      # radians
+        trans_dist = xi[..., 3:].norm(dim=-1) / max(float(scene_scale), _EPS)
+        rot_huber = torch.where(
+            rot_dist <= huber_rot_rad,
+            torch.ones_like(rot_dist),
+            huber_rot_rad / rot_dist.clamp(min=_EPS),
         )
+        trans_huber = torch.where(
+            trans_dist <= huber_trans,
+            torch.ones_like(trans_dist),
+            huber_trans / trans_dist.clamp(min=_EPS),
+        )
+        huber = torch.minimum(rot_huber, trans_huber)
         eff_w = base_w * huber
         eff_w = eff_w / eff_w.sum().clamp(min=_EPS)
         xi_mean = (eff_w.unsqueeze(-1) * xi).sum(dim=0)

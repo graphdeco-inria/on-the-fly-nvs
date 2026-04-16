@@ -321,6 +321,29 @@ class SceneModel:
                     render_pkg["visibility_filter"], render_pkg["radii"].shape[0]
                 )
 
+                # Clamp raw Gaussian params to keep the rasterizer happy.
+                # Without on-the-fly-nvs lacks 3DGS-style densification/prune,
+                # so raw_scaling drifts unboundedly after many iterations and
+                # `exp(raw_scaling)` overflows the tile-count arithmetic inside
+                # `FORWARD::preprocess` → illegal memory access at iter>=20.
+                # log(20) ≈ 3.0 keeps exp(scaling) ≤ 20 which is already much
+                # larger than the 0.1-unit scene scale.
+                raw_scaling = self.gaussian_params["scaling"]["val"]
+                if raw_scaling.numel() > 0:
+                    raw_scaling.data.clamp_(min=-10.0, max=3.0)
+                raw_xyz = self.gaussian_params["xyz"]["val"]
+                if raw_xyz.numel() > 0:
+                    # Scene is at ~0.1-unit scale; 100 is a generous envelope
+                    # that still prevents means2D from overflowing the
+                    # rasterizer's tile arithmetic.
+                    raw_xyz.data.clamp_(min=-100.0, max=100.0)
+                # Guard against stray NaNs from numerically unstable updates.
+                for key in ("xyz", "scaling", "rotation", "opacity", "f_dc"):
+                    if key in self.gaussian_params:
+                        v = self.gaussian_params[key]["val"]
+                        if v.numel() > 0:
+                            torch.nan_to_num_(v.data, nan=0.0, posinf=0.0, neginf=0.0)
+
             keyframe.latest_invdepth = render_pkg["invdepth"].detach()
 
         self.valid_Rt_cache[keyframe_id] = False

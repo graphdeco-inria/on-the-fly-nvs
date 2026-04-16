@@ -483,6 +483,77 @@ if __name__ == "__main__":
     # Set to inference mode so that the model can be rendered properly
     scene_model.enable_inference_mode()
 
+    # === Post-hoc render evaluation (all keyframes) =========================
+    # Motivated by rig-mode having no test_hold: render each keyframe from its
+    # own pose, compare against the loaded GT, dump images + per-frame metrics.
+    # Backward is never called here → bypasses the iter≥10 CUDA rasterizer
+    # crash and works with iter=2 baseline.
+    if getattr(args, "use_rig", False):
+        import cv2
+        import numpy as np
+        from fused_ssim import fused_ssim
+        from utils import psnr as psnr_fn
+        try:
+            import lpips as lpips_mod
+            lpips_fn = lpips_mod.LPIPS(net="vgg").cuda().eval()
+        except Exception:
+            lpips_fn = None
+        eval_dir = os.path.join(args.model_path, "render_eval")
+        os.makedirs(eval_dir, exist_ok=True)
+        per_frame = []
+        with torch.no_grad():
+            for kf in scene_model.keyframes:
+                pkg = scene_model.render_from_id(kf.index, pyr_lvl=0)
+                rendered = pkg["render"].clamp(0, 1)
+                gt = kf.image_pyr[0].to(rendered.device)
+                if gt.shape[-2:] != rendered.shape[-2:]:
+                    continue
+                p = float(psnr_fn(rendered, gt))
+                s = float(fused_ssim(rendered[None], gt[None], train=False).item())
+                if lpips_fn is not None:
+                    r01 = rendered[None] * 2 - 1
+                    g01 = gt[None] * 2 - 1
+                    l = float(lpips_fn(r01, g01).item())
+                else:
+                    l = float("nan")
+                name = kf.info.get("name", f"kf{kf.index:04d}")
+                if not name.endswith(".png"):
+                    name = name + ".png"
+                # side-by-side: rendered | gt
+                img_np = torch.cat([rendered, gt], dim=-1)
+                img_np = (img_np.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                cv2.imwrite(os.path.join(eval_dir, name), img_np)
+                per_frame.append({
+                    "name": name, "rig_ts": kf.info.get("rig_ts"),
+                    "rig_view": kf.info.get("rig_view"),
+                    "psnr": p, "ssim": s, "lpips": l,
+                })
+        if per_frame:
+            psnrs = [x["psnr"] for x in per_frame]
+            ssims = [x["ssim"] for x in per_frame]
+            lpipss = [x["lpips"] for x in per_frame if not (x["lpips"] != x["lpips"])]
+            summary = {
+                "num_frames": len(per_frame),
+                "psnr_mean": float(np.mean(psnrs)),
+                "ssim_mean": float(np.mean(ssims)),
+                "lpips_mean": (float(np.mean(lpipss)) if lpipss else float("nan")),
+                "psnr_min": float(np.min(psnrs)),
+                "psnr_max": float(np.max(psnrs)),
+            }
+            import json as _json
+            with open(os.path.join(eval_dir, "metrics.json"), "w") as _f:
+                _json.dump({"summary": summary, "per_frame": per_frame}, _f, indent=2)
+            print(
+                "[post-hoc render] "
+                f"n={summary['num_frames']}  "
+                f"PSNR={summary['psnr_mean']:.2f}  "
+                f"SSIM={summary['ssim_mean']:.3f}  "
+                f"LPIPS={summary['lpips_mean']:.3f}  "
+                f"(range PSNR {summary['psnr_min']:.2f}–{summary['psnr_max']:.2f})"
+            )
+    # ========================================================================
+
     # Save the model and metrics
     print("Saving the reconstruction to:", args.model_path)
     metrics = scene_model.save(args.model_path, reconstruction_time, len(dataset))
