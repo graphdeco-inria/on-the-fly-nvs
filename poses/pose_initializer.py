@@ -378,6 +378,16 @@ class PoseInitializer():
         rig_t_out = rig_t_out * scale
         xyz_out = xyz_out * scale
 
+        # Prune BA outlier xyz: MiniBARig can diverge a few 3D points to
+        # extreme depths. Replace with NaN so downstream has_pt3d masks
+        # naturally exclude them from triangulation / Gaussian spawn.
+        xyz_norm = xyz_out.norm(dim=-1)
+        xyz_median = xyz_norm.median()
+        outlier_mask = xyz_norm > 10.0 * xyz_median.clamp_min(0.01)
+        n_outliers = int(outlier_mask.sum().item())
+        if n_outliers > 0:
+            xyz_out[outlier_mask] = float("nan")
+
         rig_Rts = torch.eye(4, device="cuda")[None].repeat(N_ts, 1, 1)
         rig_Rts[:, :3, :3] = sixD2mtx(rig_R_out)
         rig_Rts[:, :3, 3] = rig_t_out

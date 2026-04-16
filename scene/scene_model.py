@@ -302,6 +302,9 @@ class SceneModel:
         l1_loss = (image - gt_image).abs().mean()
         ssim_loss = 1 - fused_ssim(image[None], gt_image[None])
         depth_loss = (invdepth - mono_idepth).abs().mean()
+        # NOTE: depth_loss_weight를 0으로 만들지 말 것. mono depth가 절대 scale은
+        # 안 맞아도 ordinal prior로 Gaussian depth ordering을 안정화시키고 있음.
+        # weight=0 → PSNR -0.58, ATE 12-18× 악화 (검증: 2026-04-16, Fix 2 시도).
         loss = (
             self.lambda_dssim * ssim_loss
             + (1 - self.lambda_dssim) * l1_loss
