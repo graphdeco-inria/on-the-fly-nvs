@@ -248,6 +248,13 @@ class PoseInitializer():
             # effective npts is a multiple of n_views.
             self._rig_npts_per_view = args.num_pts_miniba_bootstrap // n_views
             self._rig_bootstrap_npts = self._rig_npts_per_view * n_views
+            # Cache the args needed to rebuild bootstrap MiniBARig with a
+            # different n_views (see RIG_BOOTSTRAP_SKIP_VIEWS handling in
+            # initialize_bootstrap_rig — measurement-only env var, not used
+            # in the default path).
+            self._args_bootstrap_n_ts = args.num_keyframes_miniba_bootstrap
+            self._args_bootstrap_iters = args.iters_miniba_bootstrap
+            self._args_bootstrap_optimize_focal = (not args.fix_focal)
             self.miniba_bootstrap_rig = MiniBARig(
                 n_ts=args.num_keyframes_miniba_bootstrap,
                 n_views=n_views,
@@ -488,11 +495,39 @@ class PoseInitializer():
             rig_Rts (N_ts, 4, 4), f, final_residual, xyz_out (npts, 3),
             view_names (list, matches rig_config.view_names ordering).
         """
-        view_names = list(rig_config.view_names)
+        all_view_names = list(rig_config.view_names)
+        # RIG_BOOTSTRAP_SKIP_VIEWS=High_Cam02,Low_Cam02 lets us measure the
+        # P0-D upper bound (what would happen if structurally bad views
+        # didn't poison bootstrap). Rebuilds MiniBARig with reduced n_views
+        # since dimensions are baked into the optimizer at construction.
+        skip_views = {
+            v.strip()
+            for v in os.environ.get("RIG_BOOTSTRAP_SKIP_VIEWS", "").split(",")
+            if v.strip()
+        }
+        view_names = [v for v in all_view_names if v not in skip_views]
+        if skip_views:
+            print(
+                f"[bootstrap_rig] RIG_BOOTSTRAP_SKIP_VIEWS="
+                f"{','.join(sorted(skip_views))} → using {len(view_names)} "
+                f"views (from {len(all_view_names)})"
+            )
         N_views = len(view_names)
         N_ts = len(desc_kpts_per_ts_per_view)
-        npts_per_view = self.num_pts_miniba_bootstrap // N_views
+        npts_per_view = self._rig_npts_per_view  # keep per-view budget stable
         actual_npts = npts_per_view * N_views
+
+        if skip_views:
+            bootstrap_ba = MiniBARig(
+                n_ts=self._args_bootstrap_n_ts,
+                n_views=N_views,
+                npts=actual_npts,
+                optimize_focal=self._args_bootstrap_optimize_focal,
+                optimize_3Dpts=True,
+                iters=self._args_bootstrap_iters,
+            )
+        else:
+            bootstrap_ba = self.miniba_bootstrap_rig
 
         per_view_desc_kpts_list = {
             v: [desc_kpts_per_ts_per_view[ts][v] for ts in range(N_ts)]
@@ -614,7 +649,7 @@ class PoseInitializer():
         rig_R_init = torch.eye(3, 2, device="cuda")[None].repeat(N_ts, 1, 1).contiguous()
         rig_t_init = torch.zeros(N_ts, 3, device="cuda")
 
-        rig_R_out, rig_t_out, f_out, xyz_out, r, r_init, mask = self.miniba_bootstrap_rig(
+        rig_R_out, rig_t_out, f_out, xyz_out, r, r_init, mask = bootstrap_ba(
             rig_R_init, rig_t_init, f_init_t, xyz_init,
             rel_R_all, rel_t_all, self.centre, uv.reshape(-1).contiguous(),
         )
