@@ -86,6 +86,10 @@ class PoseInitializer():
                 optimize_3Dpts=False,
                 iters=args.iters_miniba_incr,
             )
+            # Track incremental refinement health. >10% fallback rate is a
+            # signal to investigate BA hyperparameters or matcher quality.
+            self._refine_call_count = 0
+            self._refine_fail_count = 0
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -371,22 +375,42 @@ class PoseInitializer():
         self.f = f_out
         self.intrinsics = torch.cat([f_out, self.centre], dim=0)
 
-        # Scale so consecutive rig centers have mean distance 0.1.
+        # Scale so consecutive rig centers have median distance 0.1.
+        # Median is robust to a single bad timestep that bootstrap BA might
+        # leave at an outlier position; mean would be dragged by it.
         rel_rig_t = rig_t_out[:-1] - rig_t_out[1:]
-        rel_rig_t_mean = rel_rig_t.norm(dim=-1).mean()
-        scale = 0.1 / rel_rig_t_mean.clamp_min(1e-6)
+        rel_rig_t_med = rel_rig_t.norm(dim=-1).median()
+        scale = 0.1 / rel_rig_t_med.clamp_min(1e-6)
         rig_t_out = rig_t_out * scale
         xyz_out = xyz_out * scale
 
-        # Prune BA outlier xyz: MiniBARig can diverge a few 3D points to
-        # extreme depths. Replace with NaN so downstream has_pt3d masks
-        # naturally exclude them from triangulation / Gaussian spawn.
+        # Prune BA outlier xyz. The right signal is *reprojection error per
+        # point*, not raw distance; far points may still be correct, while
+        # close points can be junk if their residual is high. Distance and
+        # observation count are kept as a safety net (OR-combined).
+        n_obs = N_ts * N_views
+        r_view = r.view(actual_npts, n_obs, 2)
+        mask_view = mask.view(actual_npts, n_obs, 2)
+        r_abs = (r_view * mask_view).abs()
+        valid_count = mask_view.sum(dim=(-1, -2)).clamp_min(1)
+        per_pt_err = r_abs.sum(dim=(-1, -2)) / valid_count
+        per_pt_err_med = per_pt_err.median().clamp_min(1.0)
+        outlier_repr = per_pt_err > 5.0 * per_pt_err_med
         xyz_norm = xyz_out.norm(dim=-1)
-        xyz_median = xyz_norm.median()
-        outlier_mask = xyz_norm > 10.0 * xyz_median.clamp_min(0.01)
+        xyz_median = xyz_norm.median().clamp_min(0.01)
+        outlier_dist = xyz_norm > 10.0 * xyz_median
+        outlier_few = mask_view.any(dim=-1).sum(dim=-1) < 2
+        outlier_mask = outlier_repr | outlier_dist | outlier_few
         n_outliers = int(outlier_mask.sum().item())
         if n_outliers > 0:
             xyz_out[outlier_mask] = float("nan")
+        print(
+            f"[bootstrap_rig] outliers pruned: "
+            f"repr={int(outlier_repr.sum())}, "
+            f"dist={int(outlier_dist.sum())}, "
+            f"few_obs={int(outlier_few.sum())}, "
+            f"total={n_outliers}/{actual_npts}"
+        )
 
         rig_Rts = torch.eye(4, device="cuda")[None].repeat(N_ts, 1, 1)
         rig_Rts[:, :3, :3] = sixD2mtx(rig_R_out)
@@ -481,12 +505,20 @@ class PoseInitializer():
         # Takes PnP+Fréchet mean output as initial guess, tightens it with
         # full reprojection residual across all 9 views simultaneously.
         if hasattr(self, "miniba_incr_rig"):
+            self._refine_call_count += 1
             try:
                 rig_pose = self._refine_rig_pose_miniba(rig_pose, correspondences, rig_config)
             except Exception as e:
                 # Refinement is a best-effort tightening; fall back to PnP
                 # result on any numerical hiccup instead of dropping the ts.
-                print(f"rig incr refinement failed ({e}); keeping PnP result")
+                self._refine_fail_count += 1
+                fail_rate = self._refine_fail_count / max(self._refine_call_count, 1)
+                print(
+                    f"rig incr refinement failed ({e}); fallback to PnP. "
+                    f"cumulative fail rate: "
+                    f"{self._refine_fail_count}/{self._refine_call_count} "
+                    f"({100 * fail_rate:.1f}%)"
+                )
         return rig_pose, stats
 
     @torch.no_grad()
