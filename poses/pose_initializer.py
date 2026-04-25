@@ -20,6 +20,84 @@ from scene.keyframe import Keyframe
 from poses.ransac import RANSACEstimator, EstimatorType
 from rig.rig_pnp import rig_pnp_per_view
 
+
+def _print_matcher_diag(records, view_names, n_ts):
+    """Inlier-ratio histogram per matcher call. Splits losses by stage:
+    NN match (semantic descriptor agreement) vs RANSAC fundamental (geometric)."""
+    if not records:
+        print("[diag] no matcher records.")
+        return
+    n_calls = len(records)
+    avg_kpts = (sum(r["n_kpts1"] for r in records) +
+                sum(r["n_kpts2"] for r in records)) / (2 * n_calls)
+    avg_match_nn = sum(r["n_match_nn"] for r in records) / n_calls
+    avg_inliers = sum(r["n_inliers"] for r in records) / n_calls
+    nn_ratio = avg_match_nn / max(avg_kpts, 1)
+    inlier_ratio_of_match = avg_inliers / max(avg_match_nn, 1)
+    inlier_ratio_of_kpts = avg_inliers / max(avg_kpts, 1)
+
+    print(f"[diag/matcher] {n_calls} pair calls across {len(view_names)} views, "
+          f"{n_ts} ts (C(N_ts,2)={n_ts * (n_ts - 1) // 2} per view)")
+    print(f"[diag/matcher] avg_kpts/img={avg_kpts:.0f}  "
+          f"avg_NN_match={avg_match_nn:.0f} ({100 * nn_ratio:.1f}% of kpts)  "
+          f"avg_inliers={avg_inliers:.0f} ({100 * inlier_ratio_of_match:.1f}% of NN, "
+          f"{100 * inlier_ratio_of_kpts:.1f}% of kpts)")
+
+    # Distribution buckets of inliers per call
+    counts = sorted(r["n_inliers"] for r in records)
+    bins = [0, 10, 50, 100, 200, 500, 1000, 99999]
+    bin_labels = ["0", "1-9", "10-49", "50-99", "100-199", "200-499", "500-999", "1000+"]
+    hist = [0] * len(bin_labels)
+    for c in counts:
+        for i in range(len(bins) - 1):
+            if bins[i] <= c < bins[i + 1]:
+                hist[i] += 1
+                break
+    print(f"[diag/matcher] inliers/call distribution:")
+    for lbl, n in zip(bin_labels, hist):
+        bar = "#" * int(40 * n / max(n_calls, 1))
+        print(f"  {lbl:>9}: {n:>4} ({100 * n / n_calls:>5.1f}%) {bar}")
+
+    # Per-view breakdown (which view is weakest?). Records are per-call across
+    # all 9 views; group by lower-numbered kID's view.
+    n_views = len(view_names)
+    per_view_inliers = {v: [] for v in view_names}
+    for r in records:
+        v_idx = (min(r["kID"], r["kID_other"])) % n_views
+        per_view_inliers[view_names[v_idx]].append(r["n_inliers"])
+    print(f"[diag/matcher] per-view mean inliers/call:")
+    for v in view_names:
+        arr = per_view_inliers[v]
+        if not arr:
+            continue
+        m = sum(arr) / len(arr)
+        print(f"  {v:>14}: {m:>6.0f}  (n_calls={len(arr)})")
+
+
+def _print_obs_histograms(uv, view_names, npts_per_view, n_ts):
+    """Per-point observation count histogram. uv: (npts_total, n_ts, n_views, 2)."""
+    valid = (uv >= 0).all(dim=-1)              # (npts, n_ts, n_views)
+    obs_count = valid.any(dim=-1).sum(dim=-1)  # (npts,) — # of ts where ANY view sees it
+    bins = [(0, 1, "0"), (1, 2, "1"), (2, 3, "2"), (3, 6, "3-5"),
+            (6, 11, "6-10"), (11, 99999, "11+")]
+    total = obs_count.numel()
+    print(f"[diag/obs] per-point timestep-observation histogram (n={total}):")
+    for lo, hi, lbl in bins:
+        n = int(((obs_count >= lo) & (obs_count < hi)).sum().item())
+        bar = "#" * int(40 * n / max(total, 1))
+        print(f"  ts_obs {lbl:>5}: {n:>5} ({100 * n / total:>5.1f}%) {bar}")
+    print(f"[diag/obs] {'-' * 40}")
+
+    # Per-view: each chunk of npts_per_view belongs to one view.
+    print(f"[diag/obs] per-view few_obs (<2 ts) ratio:")
+    for v_idx, v in enumerate(view_names):
+        lo = v_idx * npts_per_view
+        hi = lo + npts_per_view
+        view_obs = obs_count[lo:hi]
+        few = int((view_obs < 2).sum().item())
+        print(f"  {v:>14}: {few:>4}/{npts_per_view} ({100 * few / npts_per_view:>5.1f}%)")
+
+
 class PoseInitializer():
     """Fast pose initializer using MiniBA and the previous frames."""
     def __init__(self, width, height, triangulator, matcher, max_pnp_error, args, rig_config=None):
@@ -318,6 +396,14 @@ class PoseInitializer():
         # Time-axis exhaustive matching within each view — TODO.md §3.3.1.
         # Cross-view matching is intentionally skipped (rotation-only rig has
         # zero baseline intra-timestep, so cross-view matches carry no depth info).
+        from poses.matcher import (
+            _diag_enabled as _matcher_diag_on,
+            reset_matcher_diag, get_matcher_diag,
+        )
+        diag = _matcher_diag_on()
+        if diag:
+            reset_matcher_diag()
+
         for v_idx, v_name in enumerate(view_names):
             dk_list = per_view_desc_kpts_list[v_name]
             for i in range(N_ts):
@@ -327,6 +413,9 @@ class PoseInitializer():
                         remove_outliers=True, update_kpts_flag="inliers",
                         kID=make_kID(v_idx, i), kID_other=make_kID(v_idx, j),
                     )
+
+        if diag:
+            _print_matcher_diag(get_matcher_diag(), view_names, N_ts)
 
         uv = torch.full((actual_npts, N_ts, N_views, 2), -1.0, device="cuda")
         xyz_init = torch.zeros(actual_npts, 3, device="cuda")
@@ -357,6 +446,9 @@ class PoseInitializer():
                 ts_idx = int(ts_hits[0].item())
                 local = depth2points(uvs_v[p, ts_idx][None], 1.0, f_init_t, self.centre)[0]
                 xyz_init[lo + p] = rel_R_all[v_idx].T @ local
+
+        if diag:
+            _print_obs_histograms(uv, view_names, npts_per_view, N_ts)
 
         xyz_init /= xyz_init[..., -1:].clamp_min(1)
         xyz_init[..., -1] = 1

@@ -9,9 +9,28 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
+
 import torch
 
 from poses.ransac import EstimatorType, RANSACEstimator
+
+# Diagnostic: when BOOTSTRAP_DIAG=1, Matcher accumulates per-call counts
+# (kpts pre-NN, NN matches, RANSAC inliers) and exposes them as a flat list
+# so callers can print histograms. Cleared whenever reset_diag() is called.
+_DIAG_RECORDS: list[dict] = []
+
+
+def _diag_enabled() -> bool:
+    return bool(int(os.environ.get("BOOTSTRAP_DIAG", "0")))
+
+
+def reset_matcher_diag() -> None:
+    _DIAG_RECORDS.clear()
+
+
+def get_matcher_diag() -> list[dict]:
+    return list(_DIAG_RECORDS)
 
 
 class Matches:
@@ -86,9 +105,12 @@ class Matcher:
         Returns:
             Matches: A Matches object containing the matched keypoints and their indices.
         """
+        n_kpts1 = int(desc_kpts.kpts.shape[0])
+        n_kpts2 = int(desc_kpts_other.kpts.shape[0])
         idx, idx_other, mask = match(
             desc_kpts.feats.cuda(), desc_kpts_other.feats.cuda()
         )
+        n_match_nn = int(mask.sum().item())
         idx = idx[mask]
         idx_other = idx_other[mask]
         kpts = desc_kpts.kpts[idx]
@@ -98,12 +120,22 @@ class Matcher:
         kpts_all = kpts
         kpts_other_all = kpts_other
 
+        n_inliers = n_match_nn
         if remove_outliers:
             F, mask = self.fundmat_estimator(kpts, kpts_other)
             idx = idx[mask]
             idx_other = idx_other[mask]
             kpts = kpts[mask]
             kpts_other = kpts_other[mask]
+            n_inliers = int(mask.sum().item())
+
+        if _diag_enabled():
+            _DIAG_RECORDS.append({
+                "kID": kID, "kID_other": kID_other,
+                "n_kpts1": n_kpts1, "n_kpts2": n_kpts2,
+                "n_match_nn": n_match_nn, "n_inliers": n_inliers,
+                "ransac": bool(remove_outliers),
+            })
 
         if update_kpts_flag == "all":
             assert kID >= 0 and kID_other >= 0
