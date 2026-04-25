@@ -498,8 +498,9 @@ class PoseInitializer():
         all_view_names = list(rig_config.view_names)
         # RIG_BOOTSTRAP_SKIP_VIEWS=High_Cam02,Low_Cam02 lets us measure the
         # P0-D upper bound (what would happen if structurally bad views
-        # didn't poison bootstrap). Rebuilds MiniBARig with reduced n_views
-        # since dimensions are baked into the optimizer at construction.
+        # didn't poison bootstrap). Skipped views still get matched (so
+        # downstream add_new_gaussians can triangulate from their desc_kpts)
+        # but they're excluded from xyz_init / uv / BA.
         skip_views = {
             v.strip()
             for v in os.environ.get("RIG_BOOTSTRAP_SKIP_VIEWS", "").split(",")
@@ -513,6 +514,7 @@ class PoseInitializer():
                 f"views (from {len(all_view_names)})"
             )
         N_views = len(view_names)
+        N_views_match = len(all_view_names)  # for kID space (9, fixed)
         N_ts = len(desc_kpts_per_ts_per_view)
         npts_per_view = self._rig_npts_per_view  # keep per-view budget stable
         actual_npts = npts_per_view * N_views
@@ -531,11 +533,14 @@ class PoseInitializer():
 
         per_view_desc_kpts_list = {
             v: [desc_kpts_per_ts_per_view[ts][v] for ts in range(N_ts)]
-            for v in view_names
+            for v in all_view_names
         }
 
-        def make_kID(v_idx, ts):
-            return ts * N_views + v_idx
+        def make_kID(v_idx_in_all, ts):
+            # kIDs use the full 9-view space so matching populates matches
+            # consistently for downstream triangulation, even when BA skips
+            # some views.
+            return ts * N_views_match + v_idx_in_all
 
         # Time-axis exhaustive matching within each view — TODO.md §3.3.1.
         # Cross-view matching is intentionally skipped (rotation-only rig has
@@ -548,14 +553,15 @@ class PoseInitializer():
         if diag:
             reset_matcher_diag()
 
-        for v_idx, v_name in enumerate(view_names):
+        for v_idx_all, v_name in enumerate(all_view_names):
             dk_list = per_view_desc_kpts_list[v_name]
             for i in range(N_ts):
                 for j in range(i + 1, N_ts):
                     _ = self.matcher(
                         dk_list[i], dk_list[j],
                         remove_outliers=True, update_kpts_flag="inliers",
-                        kID=make_kID(v_idx, i), kID_other=make_kID(v_idx, j),
+                        kID=make_kID(v_idx_all, i),
+                        kID_other=make_kID(v_idx_all, j),
                     )
 
         if diag:
@@ -585,8 +591,9 @@ class PoseInitializer():
         n_seeded_unit = 0
 
         for v_idx, v_name in enumerate(view_names):
+            v_idx_all = all_view_names.index(v_name)
             dk_list = per_view_desc_kpts_list[v_name]
-            kIDs = [make_kID(v_idx, i) for i in range(N_ts)]
+            kIDs = [make_kID(v_idx_all, i) for i in range(N_ts)]
             uvs_v, _ = self.build_problem(dk_list, npts_per_view, N_ts, N_ts, 2, kIDs)
             lo = v_idx * npts_per_view
             hi = (v_idx + 1) * npts_per_view
