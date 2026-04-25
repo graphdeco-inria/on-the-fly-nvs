@@ -103,6 +103,33 @@ def get_t_s(d):
     return t, s
 
 
+def relative_idepth_to_depth(
+    idepth: torch.Tensor, fallback_depth: float = 1.0
+) -> torch.Tensor:
+    """Convert Depth-Anything-V2's median/MAD-normalised inverse depth
+    (per-view, can be negative) to positive depth. Shifts the whole map so
+    its minimum becomes +1.0, then inverts. Preserves relative ordering;
+    absolute scale is per-view (BA's median-consecutive normalisation later
+    re-anchors everything to the rig scale, see pose_initializer.py:374-377).
+
+    NaN / Inf entries fall back to ``fallback_depth``. If every entry is
+    non-finite, returns a constant ``fallback_depth`` map of the same shape.
+    """
+    finite_mask = torch.isfinite(idepth)
+    if not finite_mask.any():
+        return torch.full_like(idepth, fallback_depth)
+    finite_vals = idepth[finite_mask]
+    idepth_min = finite_vals.min()
+    shifted = idepth - idepth_min + 1.0  # >= 1.0 wherever finite
+    depth = 1.0 / shifted
+    # Substitute fallback wherever the *input* was non-finite (NaN/Inf).
+    # 1/inf = 0 is "finite" by torch.isfinite but is not a useful depth.
+    depth = torch.where(
+        finite_mask, depth, torch.full_like(depth, fallback_depth)
+    )
+    return depth
+
+
 def align_samples(tri_idepth: torch.Tensor, mono_idepth: torch.Tensor):
     t_tri, s_tri = get_t_s(tri_idepth)
     t_mono, s_mono = get_t_s(mono_idepth)
