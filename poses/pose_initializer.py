@@ -675,6 +675,11 @@ class PoseInitializer():
             f"repr_only={repr_only}, "
             f"dist_only={dist_only}"
         )
+        few_per_view = outlier_few.view(N_views, npts_per_view).sum(dim=1)
+        print(
+            "[bootstrap_rig] few_obs per view: "
+            + ", ".join(f"{v}={int(c)}" for v, c in zip(view_names, few_per_view.tolist()))
+        )
 
         rig_Rts = torch.eye(4, device="cuda")[None].repeat(N_ts, 1, 1)
         rig_Rts[:, :3, :3] = sixD2mtx(rig_R_out)
