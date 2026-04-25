@@ -170,9 +170,27 @@ if __name__ == "__main__":
                     {v: data["frames"][v][2] for v in view_order}
                     for data in bootstrap_rig_data
                 ]
+                # Pre-compute monocular inverse depth for every (ts, view) so
+                # initialize_bootstrap_rig can seed xyz with a geometric prior
+                # instead of unit depth. Maps are interpolated to (height,
+                # width) once here so the seed loop just samples; idepth stays
+                # in DA-V2's median-zero / MAD-one normalisation, conversion
+                # to depth happens inside pose_initializer.
+                mono_idepth_per_ts_per_view = []
+                for data in bootstrap_rig_data:
+                    view_dict = {}
+                    for v in view_order:
+                        idepth, _ = depth_estimator(data["frames"][v][0])
+                        idepth_full = torch.nn.functional.interpolate(
+                            idepth, (height, width),
+                            mode="bilinear", align_corners=True,
+                        )
+                        view_dict[v] = idepth_full
+                    mono_idepth_per_ts_per_view.append(view_dict)
                 rig_Rts, f_out, res, _xyz, _view_names = (
                     pose_initializer.initialize_bootstrap_rig(
-                        desc_per_ts_per_view, dataset.rig
+                        desc_per_ts_per_view, dataset.rig,
+                        mono_idepth_per_ts_per_view=mono_idepth_per_ts_per_view,
                     )
                 )
                 focal = f_out.cpu().item()
@@ -483,6 +501,16 @@ if __name__ == "__main__":
             pbar.set_postfix_str(",".join(bar_postfix), refresh=False)
 
     reconstruction_time = time.time() - reconstruction_start_time
+
+    # Persist a final, parseable runtimes summary. tqdm postfix is overwritten
+    # in-place, so it doesn't survive in the log; without this, --display_runtimes
+    # gives no machine-readable trace.
+    if args.display_runtimes:
+        print("[runtimes] avg ms per call (key:total_s/n_calls):")
+        for key, (total, count) in runtimes.items():
+            if count > 0:
+                print(f"  {key}: {1000 * total / count:.2f} ms  "
+                      f"(total={total:.2f}s, n={count})")
 
     # Set to inference mode so that the model can be rendered properly
     scene_model.enable_inference_mode()
