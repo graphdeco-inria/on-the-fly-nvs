@@ -324,16 +324,10 @@ class SceneModel:
                     render_pkg["visibility_filter"], render_pkg["radii"].shape[0]
                 )
 
-                # Clamp raw Gaussian params to keep the rasterizer happy.
-                # Without on-the-fly-nvs lacks 3DGS-style densification/prune,
-                # so raw_scaling drifts unboundedly after many iterations and
-                # `exp(raw_scaling)` overflows the tile-count arithmetic inside
-                # `FORWARD::preprocess` → illegal memory access at iter>=20.
-                # log(20) ≈ 3.0 keeps exp(scaling) ≤ 20 which is already much
-                # larger than the 0.1-unit scene scale.
-                raw_scaling = self.gaussian_params["scaling"]["val"]
-                if raw_scaling.numel() > 0:
-                    raw_scaling.data.clamp_(min=-10.0, max=3.0)
+                # NOTE: raw_scaling.clamp was here but REMOVED.
+                # Clamping scaling created Adam optimizer state mismatch that
+                # paradoxically *caused* the cudaErrorIllegalAddress crash at
+                # iter>=20. Removing it resolved the crash.
                 raw_xyz = self.gaussian_params["xyz"]["val"]
                 if raw_xyz.numel() > 0:
                     # Scene is at ~0.1-unit scale; 100 is a generous envelope
