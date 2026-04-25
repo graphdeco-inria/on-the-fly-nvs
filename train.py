@@ -587,6 +587,36 @@ if __name__ == "__main__":
                 )
     # ========================================================================
 
+    # Dump ref_view trajectory in TUM format (timestamp tx ty tz qx qy qz qw)
+    # for downstream Sim(3) comparison with COLMAP. world-to-camera convention,
+    # matching how COLMAP serializes images.bin/images.txt.
+    if getattr(args, "use_rig", False):
+        from scipy.spatial.transform import Rotation as _R
+        ref_view = getattr(args, "ref_view", "") or ""
+        ref_kfs = sorted(
+            [kf for kf in scene_model.keyframes
+             if kf.info.get("rig_view") == ref_view],
+            key=lambda kf: kf.info.get("rig_ts", 0),
+        )
+        if ref_kfs:
+            os.makedirs(args.model_path, exist_ok=True)
+            traj_path = os.path.join(args.model_path, "trajectory_otf.txt")
+            with open(traj_path, "w") as fout:
+                fout.write("# TUM format: timestamp tx ty tz qx qy qz qw\n")
+                fout.write("# convention: world-to-camera (matches COLMAP)\n")
+                fout.write(f"# ref_view: {ref_view}, n_keyframes: {len(ref_kfs)}\n")
+                for kf in ref_kfs:
+                    ts = int(kf.info.get("rig_ts", 0))
+                    Rt = kf.get_Rt().detach().cpu().numpy()
+                    R, t = Rt[:3, :3], Rt[:3, 3]
+                    qx, qy, qz, qw = _R.from_matrix(R).as_quat()
+                    fout.write(
+                        f"{ts} "
+                        f"{t[0]:.9f} {t[1]:.9f} {t[2]:.9f} "
+                        f"{qx:.9f} {qy:.9f} {qz:.9f} {qw:.9f}\n"
+                    )
+            print(f"[traj] dumped {len(ref_kfs)} {ref_view} poses → {traj_path}")
+
     # Save the model and metrics
     print("Saving the reconstruction to:", args.model_path)
     metrics = scene_model.save(args.model_path, reconstruction_time, len(dataset))
