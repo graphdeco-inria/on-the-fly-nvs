@@ -659,12 +659,21 @@ class PoseInitializer():
         n_outliers = int(outlier_mask.sum().item())
         if n_outliers > 0:
             xyz_out[outlier_mask] = float("nan")
+        repr_and_dist = int((outlier_repr & outlier_dist).sum())
+        dist_only = int((outlier_dist & ~outlier_repr).sum())
+        repr_only = int((outlier_repr & ~outlier_dist).sum())
         print(
             f"[bootstrap_rig] outliers pruned: "
             f"repr={int(outlier_repr.sum())}, "
             f"dist={int(outlier_dist.sum())}, "
             f"few_obs={int(outlier_few.sum())}, "
             f"total={n_outliers}/{actual_npts}"
+        )
+        print(
+            f"[bootstrap_rig] repr/dist overlap: "
+            f"repr_and_dist={repr_and_dist}, "
+            f"repr_only={repr_only}, "
+            f"dist_only={dist_only}"
         )
 
         rig_Rts = torch.eye(4, device="cuda")[None].repeat(N_ts, 1, 1)
