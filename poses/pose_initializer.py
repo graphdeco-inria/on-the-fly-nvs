@@ -550,6 +550,17 @@ class PoseInitializer():
         if diag:
             _print_obs_histograms(uv, view_names, npts_per_view, N_ts)
 
+        # KNOWN ISSUE (E0 diagnostic): for views with rel_R angle > 90° from
+        # ref (High_Cam02 at 135°, Low_Cam02 at 108°), the seeded ray's
+        # world-z is negative, and the next two lines reflect those points
+        # across z=0 to anchor them on the +1 plane. This costs us the
+        # geometric meaning of those views' seeds (BA rejects 95% of Cam02
+        # observations) but the alternative — keeping the negative-z
+        # placement — makes BA's projection gradient ill-conditioned and
+        # blows up the LM step (verified empirically: 100% rejection if we
+        # drop the force-z=1 anchor without a deeper rewrite of the
+        # parameterisation, e.g. inverse depth or per-view world frames).
+        # Treat this as accepted lossy behaviour until a structural fix.
         xyz_init /= xyz_init[..., -1:].clamp_min(1)
         xyz_init[..., -1] = 1
         xyz_init *= 1 + torch.randn_like(xyz_init[:, :1]).abs()
