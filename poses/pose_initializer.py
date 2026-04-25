@@ -653,7 +653,7 @@ class PoseInitializer():
         outlier_repr = per_pt_err > 5.0 * per_pt_err_med
         xyz_norm = xyz_out.norm(dim=-1)
         xyz_median = xyz_norm.median().clamp_min(0.01)
-        outlier_dist = xyz_norm > 10.0 * xyz_median
+        outlier_dist = xyz_norm > 30.0 * xyz_median
         outlier_few = mask_view.any(dim=-1).sum(dim=-1) < 2
         outlier_mask = outlier_repr | outlier_dist | outlier_few
         n_outliers = int(outlier_mask.sum().item())
