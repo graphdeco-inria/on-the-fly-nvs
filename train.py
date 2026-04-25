@@ -108,6 +108,12 @@ if __name__ == "__main__":
     runtimes = ["Load", "BAB", "tri", "BAI", "Add", "Init", "Opt", "anc"]
     runtimes = {key: [0, 0] for key in runtimes}
     metrics = {}
+    # Per-incremental-timestep wall clock (rig path only). Each entry is
+    # the time from the loop top until the timestep's anchor placement
+    # finished. Bootstrap-collect timesteps and the bootstrap-full-run
+    # timestep are recorded separately.
+    incremental_ts_times = []
+    bootstrap_full_time = 0.0
 
     ## Scene reconstruction
     print(f"Starting reconstruction for {args.source_path}")
@@ -119,7 +125,8 @@ if __name__ == "__main__":
     pbar = tqdm(range(0, total_iters))
     reconstruction_start_time = time.time()
     for frameID in pbar:
-        start_time = time.time()
+        ts_wall_start = time.time()
+        start_time = ts_wall_start
 
         if args.viewer_mode == "web":
             viewer.trainer_state = "running"
@@ -243,6 +250,7 @@ if __name__ == "__main__":
                 last_reboot = n_keyframes
                 if args.viewer_mode not in ["none", "web"]:
                     viewer.reset_intrinsics("point_view")
+                bootstrap_full_time = time.time() - ts_wall_start
                 continue
 
             # --- Rig-incremental (post-bootstrap) ---
@@ -297,6 +305,7 @@ if __name__ == "__main__":
             start_time = time.time()
             scene_model.place_anchor_if_needed()
             increment_runtime(runtimes["anc"], start_time)
+            incremental_ts_times.append(time.time() - ts_wall_start)
             continue
 
         # === Non-rig path ===
@@ -511,6 +520,33 @@ if __name__ == "__main__":
             if count > 0:
                 print(f"  {key}: {1000 * total / count:.2f} ms  "
                       f"(total={total:.2f}s, n={count})")
+
+    # Machine-parseable runtime dump for downstream report tooling.
+    # Always written so the report builder doesn't have to scrape the log.
+    try:
+        gpu_peak_gb = float(torch.cuda.max_memory_allocated() / 1024 ** 3)
+    except Exception:
+        gpu_peak_gb = float("nan")
+    n_gauss_final = int(scene_model.n_active_gaussians)
+    runtime_dump = {
+        "wall_clock_s": reconstruction_time,
+        "bootstrap_full_s": bootstrap_full_time,
+        "incremental_ts_times_s": list(incremental_ts_times),
+        "stages": {
+            k: {"total_s": v[0], "n_calls": v[1]} for k, v in runtimes.items()
+        },
+        "gpu_peak_gb": gpu_peak_gb,
+        "n_gauss_final": n_gauss_final,
+        "num_iterations": args.num_iterations,
+        "rig_holdout_view": getattr(args, "rig_holdout_view", "") or "",
+    }
+    os.makedirs(args.model_path, exist_ok=True)
+    with open(os.path.join(args.model_path, "runtimes.json"), "w") as _f:
+        import json as _json
+        _json.dump(runtime_dump, _f, indent=2)
+    print(f"[runtimes] gpu_peak={gpu_peak_gb:.2f} GB, "
+          f"n_gauss={n_gauss_final}, "
+          f"per-incr-ts n={len(incremental_ts_times)}")
 
     # Set to inference mode so that the model can be rendered properly
     scene_model.enable_inference_mode()
