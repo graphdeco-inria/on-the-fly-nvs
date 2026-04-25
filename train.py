@@ -201,14 +201,18 @@ if __name__ == "__main__":
                         n_keyframes += 1
                 increment_runtime(runtimes["Add"], start_time)
 
-                # Gaussian initialization: only on ref-view keyframes (their
-                # desc_kpts have time-axis matches from bootstrap). Non-ref
-                # keyframes just build their depth pyramid from mono depth.
+                # Gaussian initialization from ALL 9 views (was: ref only).
+                # Each view's desc_kpts.pts3d is filled in by update_3dpts()
+                # inside add_new_gaussians via its own time-axis matches that
+                # bootstrap_rig has already generated. add_new_gaussians also
+                # handles align_depth internally, so the explicit non-ref
+                # align_depth loop is no longer needed.
                 start_time = time.time()
-                for kf in scene_model.keyframes:
-                    if kf.info["rig_view"] != dataset.ref_view:
-                        kf.align_depth()
-                for scene_idx in ref_kf_scene_indices:
+                first_bootstrap_scene_idx = (
+                    len(scene_model.keyframes)
+                    - len(bootstrap_rig_data) * len(view_order)
+                )
+                for scene_idx in range(first_bootstrap_scene_idx, len(scene_model.keyframes)):
                     scene_model.add_new_gaussians(scene_idx)
                 increment_runtime(runtimes["Init"], start_time)
 
@@ -261,9 +265,9 @@ if __name__ == "__main__":
                 prev_keyframe = kf
                 if v_name == dataset.ref_view:
                     ref_kf_by_ts[ts] = kf
-                    scene_model.add_new_gaussians()
-                else:
-                    kf.align_depth()
+                # spawn from all 9 views (was: ref only). add_new_gaussians
+                # handles align_depth + update_3dpts internally.
+                scene_model.add_new_gaussians()
                 n_keyframes += 1
             increment_runtime(runtimes["Add"], start_time)
             start_time = time.time()
