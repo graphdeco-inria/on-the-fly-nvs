@@ -9,6 +9,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
+
 import torch
 import math
 
@@ -17,7 +19,8 @@ import numpy as np
 from poses.feature_detector import DescribedKeypoints
 from poses.mini_ba import MiniBA
 from poses.mini_ba_rig import MiniBARig
-from utils import fov2focal, depth2points, sixD2mtx, mtx2sixD
+from utils import fov2focal, depth2points, sixD2mtx, mtx2sixD, sample
+from scene.mono_depth import relative_idepth_to_depth
 from scene.keyframe import Keyframe
 from poses.ransac import RANSACEstimator, EstimatorType
 from rig.rig_pnp import rig_pnp_per_view
@@ -467,13 +470,19 @@ class PoseInitializer():
             return None
 
     @torch.no_grad()
-    def initialize_bootstrap_rig(self, desc_kpts_per_ts_per_view, rig_config):
+    def initialize_bootstrap_rig(self, desc_kpts_per_ts_per_view, rig_config,
+                                 mono_idepth_per_ts_per_view=None):
         """Rig-aware bootstrap (Option A, TODO §3.3.1).
 
         Args:
             desc_kpts_per_ts_per_view: list length N_ts of dict
                 {view_name: DescribedKeypoints}. All 9 views present per ts.
             rig_config: RigConfig with fixed relative_Rt per view.
+            mono_idepth_per_ts_per_view: optional list[dict[view_name,
+                Tensor (1, 1, H, W)]] of monocular *inverse* depth maps,
+                already interpolated to image (H, W). When provided, xyz_init
+                seeds use the per-pixel mono depth instead of unit depth;
+                None falls back to the original unit-depth behaviour.
 
         Returns:
             rig_Rts (N_ts, 4, 4), f, final_residual, xyz_out (npts, 3),
@@ -528,6 +537,18 @@ class PoseInitializer():
             rig_config.relative_Rt[v][:3, 3].cuda() for v in view_names
         ])
 
+        # Pre-convert idepth → depth per (ts, view) once so the per-point
+        # seed loop just samples. Each (1, 1, H, W) map.
+        mono_depth_maps = None
+        if mono_idepth_per_ts_per_view is not None:
+            mono_depth_maps = [
+                {v: relative_idepth_to_depth(ts_dict[v]).float()
+                 for v in view_names}
+                for ts_dict in mono_idepth_per_ts_per_view
+            ]
+        n_seeded_mono = 0
+        n_seeded_unit = 0
+
         for v_idx, v_name in enumerate(view_names):
             dk_list = per_view_desc_kpts_list[v_name]
             kIDs = [make_kID(v_idx, i) for i in range(N_ts)]
@@ -536,16 +557,41 @@ class PoseInitializer():
             hi = (v_idx + 1) * npts_per_view
             uv[lo:hi, :, v_idx, :] = uvs_v
 
-            # Seed xyz from each point's first valid observation, back-projecting
-            # at unit depth and lifting into the rig frame (identity rig_pose[0]).
+            # Seed xyz from each point's first valid observation. Depth comes
+            # from the pre-computed mono depth map (sampled at the keypoint
+            # pixel) when available, else falls back to unit depth.
             valid = (uvs_v >= 0).all(dim=-1)  # (npts_per_view, N_ts)
             for p in range(npts_per_view):
                 ts_hits = valid[p].nonzero(as_tuple=False).flatten()
                 if ts_hits.numel() == 0:
                     continue
                 ts_idx = int(ts_hits[0].item())
-                local = depth2points(uvs_v[p, ts_idx][None], 1.0, f_init_t, self.centre)[0]
+                uv_pt = uvs_v[p, ts_idx]
+
+                depth_pt = 1.0
+                if mono_depth_maps is not None:
+                    depth_map = mono_depth_maps[ts_idx][v_name]
+                    sampled = sample(
+                        depth_map, uv_pt.view(1, 1, 1, 2),
+                        self.width, self.height,
+                    )
+                    depth_pt = float(sampled[0, 0, 0, 0].item())
+                    if not (depth_pt > 0 and torch.isfinite(torch.tensor(depth_pt))):
+                        depth_pt = 1.0
+                        n_seeded_unit += 1
+                    else:
+                        n_seeded_mono += 1
+                else:
+                    n_seeded_unit += 1
+
+                local = depth2points(uv_pt[None], depth_pt, f_init_t, self.centre)[0]
                 xyz_init[lo + p] = rel_R_all[v_idx].T @ local
+
+        if mono_depth_maps is not None and bool(int(os.environ.get("RIG_DIAG", "0"))):
+            tot = n_seeded_mono + n_seeded_unit
+            ratio = (100 * n_seeded_mono / max(tot, 1)) if tot else 0.0
+            print(f"[diag/seed] mono-depth seeded {n_seeded_mono}/{tot} "
+                  f"({ratio:.1f}%); unit-depth fallback {n_seeded_unit}")
 
         if diag:
             _print_obs_histograms(uv, view_names, npts_per_view, N_ts)
