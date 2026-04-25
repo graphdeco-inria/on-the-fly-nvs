@@ -531,6 +531,7 @@ if __name__ == "__main__":
                 per_frame.append({
                     "name": name, "rig_ts": kf.info.get("rig_ts"),
                     "rig_view": kf.info.get("rig_view"),
+                    "is_test": bool(kf.info.get("is_test", False)),
                     "psnr": p, "ssim": s, "lpips": l,
                 })
         if per_frame:
@@ -556,6 +557,34 @@ if __name__ == "__main__":
                 f"LPIPS={summary['lpips_mean']:.3f}  "
                 f"(range PSNR {summary['psnr_min']:.2f}–{summary['psnr_max']:.2f})"
             )
+            # Honest eval: when --rig_holdout_view is set, split metrics
+            # into train (views included in optimization) vs holdout
+            # (excluded — provides a real generalization signal).
+            holdout_pf = [x for x in per_frame if x["is_test"]]
+            train_pf = [x for x in per_frame if not x["is_test"]]
+            if holdout_pf:
+                hp = [x["psnr"] for x in holdout_pf]
+                hs = [x["ssim"] for x in holdout_pf]
+                hl = [x["lpips"] for x in holdout_pf
+                      if not (x["lpips"] != x["lpips"])]
+                tp = [x["psnr"] for x in train_pf]
+                ts = [x["ssim"] for x in train_pf]
+                tl = [x["lpips"] for x in train_pf
+                      if not (x["lpips"] != x["lpips"])]
+                print(
+                    f"[holdout view={args.rig_holdout_view}] "
+                    f"n={len(holdout_pf)}  "
+                    f"PSNR={float(np.mean(hp)):.2f}  "
+                    f"SSIM={float(np.mean(hs)):.3f}  "
+                    f"LPIPS={(float(np.mean(hl)) if hl else float('nan')):.3f}"
+                )
+                print(
+                    f"[train views] "
+                    f"n={len(train_pf)}  "
+                    f"PSNR={float(np.mean(tp)):.2f}  "
+                    f"SSIM={float(np.mean(ts)):.3f}  "
+                    f"LPIPS={(float(np.mean(tl)) if tl else float('nan')):.3f}"
+                )
     # ========================================================================
 
     # Save the model and metrics

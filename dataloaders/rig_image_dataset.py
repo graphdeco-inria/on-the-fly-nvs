@@ -103,11 +103,25 @@ class RigImageDataset:
             self.num_timesteps = len(self.timestep_names)
 
         # Per-item metadata consumed by the training loop.
+        # is_test marks holdout-view frames so add_new_gaussians skips them
+        # (pose is still estimated; only Gaussian spawn is suppressed).
+        holdout_view = (getattr(args, "rig_holdout_view", "") or "").strip()
+        if holdout_view and holdout_view not in self.rig.view_names:
+            raise ValueError(
+                f"--rig_holdout_view={holdout_view!r} is not in the rig views "
+                f"{self.rig.view_names}"
+            )
+        if holdout_view and holdout_view == self.ref_view:
+            raise ValueError(
+                f"--rig_holdout_view cannot be the ref_view ({self.ref_view}); "
+                "ref view is needed for bootstrap and incremental pose tracking."
+            )
+        self.holdout_view = holdout_view
         self.infos: Dict[str, dict] = {}
         for item in self.items:
             key = _frame_key(item["view"], item["ts"])
             self.infos[key] = {
-                "is_test": False,  # rig mode: no holdout
+                "is_test": (holdout_view != "" and item["view"] == holdout_view),
                 "name": key,
                 "rig_view": item["view"],
                 "rig_ts": item["ts"],

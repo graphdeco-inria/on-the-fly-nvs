@@ -128,6 +128,11 @@ def get_args():
                         help="Path to rig configuration JSON (Blender-style)")
     parser.add_argument('--ref_view', type=str, default="High_Cam07",
                         help="Reference view name for rig; used as Pass 1 (bootstrap + incremental)")
+    parser.add_argument('--rig_holdout_view', type=str, default="",
+                        help="If set (e.g. 'Low_Cam08'), this view is excluded from "
+                             "Gaussian optimization but kept for pose estimation and "
+                             "post-hoc evaluation. Provides an honest generalization "
+                             "metric (avoids the self-render inflation when this is empty).")
 
     ## Checkpoint options
     parser.add_argument('-m', '--model_path', default="", 

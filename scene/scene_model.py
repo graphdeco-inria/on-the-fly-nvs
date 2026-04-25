@@ -454,14 +454,14 @@ class SceneModel:
                 image = torch.clamp(render_pkg["render"], 0, 1) * 255
                 image = image.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
                 image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                is_jpeg = os.path.splitext(keyframe.info["name"])[-1].lower() in [
-                    ".jpg",
-                    ".jpeg",
-                ]
+                # rig mode names are extension-less keys (e.g. "View__ts00001");
+                # fall back to .png so cv2.imwrite has a writer.
+                name = keyframe.info["name"]
+                if not os.path.splitext(name)[-1]:
+                    name = name + ".png"
+                is_jpeg = os.path.splitext(name)[-1].lower() in [".jpg", ".jpeg"]
                 write_flag = [int(cv2.IMWRITE_JPEG_QUALITY), 100] if is_jpeg else []
-                cv2.imwrite(
-                    os.path.join(out_dir, keyframe.info["name"]), image, write_flag
-                )
+                cv2.imwrite(os.path.join(out_dir, name), image, write_flag)
 
     def render_from_id(
         self,
