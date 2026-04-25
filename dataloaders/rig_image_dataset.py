@@ -9,6 +9,7 @@ transform in its `info` dict; the training loop computes the view pose by
 composing with the stored reference pose of the same timestep (no PnP).
 """
 
+import json
 import logging
 import os
 from argparse import Namespace
@@ -34,6 +35,19 @@ class RigImageDataset:
     def __init__(self, args: Namespace):
         self.source_path = args.source_path
         self.images_root = os.path.join(args.source_path, args.images_dir)
+
+        # Auto-load focal from the extraction step's metadata so a forgotten
+        # --init_fov can't silently produce a wrong reconstruction. The
+        # extraction script (eqr_to_pinhole.py) is the source of truth.
+        meta_path = os.path.join(args.source_path, "extraction_meta.json")
+        if os.path.exists(meta_path) and args.init_focal < 0 and args.init_fov < 0:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            args.init_focal = float(meta["intrinsics"]["fx"])
+            print(
+                f"[rig] auto-loaded init_focal={args.init_focal:.1f} "
+                f"from {meta_path}"
+            )
 
         # Load rig geometry (relative Rt per view, in COLMAP world-to-camera convention).
         self.rig = load_rig_config(args.rig_config, ref_view=args.ref_view, device="cpu")
