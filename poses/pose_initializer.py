@@ -12,6 +12,8 @@
 import torch
 import math
 
+import numpy as np
+
 from poses.feature_detector import DescribedKeypoints
 from poses.mini_ba import MiniBA
 from poses.mini_ba_rig import MiniBARig
@@ -72,6 +74,104 @@ def _print_matcher_diag(records, view_names, n_ts):
             continue
         m = sum(arr) / len(arr)
         print(f"  {v:>14}: {m:>6.0f}  (n_calls={len(arr)})")
+
+
+def _print_e0_rejected_obs(uv, r, mask, view_names, n_ts, n_views, actual_npts,
+                           centre, width, height):
+    """Where do BA-rejected observations live?
+
+    For each (point, ts, view) slot: was uv valid AND BA dropped it?
+    Splits the loss along four axes so we can tell whether the BA filter is
+    being unfairly aggressive on a uniform tail (-> relax mad_scale) or
+    correctly killing junk concentrated in image corners / a bad timestep /
+    a single noisy view (-> fix data, not the filter).
+    """
+    n_obs = n_ts * n_views
+    # uv: (actual_npts, n_ts, n_views, 2). valid_before = where matcher gave us
+    # a real observation.
+    valid_before = (uv >= 0).all(dim=-1)                     # (npts, n_ts, n_views)
+    mask_view = mask.view(actual_npts, n_obs, 2).any(dim=-1) # (npts, n_obs)
+    accepted = mask_view.view(actual_npts, n_ts, n_views)
+    rejected = valid_before & ~accepted
+
+    n_valid = int(valid_before.sum().item())
+    n_rej = int(rejected.sum().item())
+    if n_valid == 0:
+        print("[diag/E0] no valid observations to analyse.")
+        return
+
+    print(f"[diag/E0] BA-rejected observations: "
+          f"{n_rej}/{n_valid} ({100 * n_rej / n_valid:.1f}%) "
+          f"valid uv → BA mask=False")
+
+    # ---- Axis 1: per-timestep (uniform vs. concentrated)
+    rej_per_ts = rejected.sum(dim=(0, 2)).cpu().numpy()
+    val_per_ts = valid_before.sum(dim=(0, 2)).cpu().numpy()
+    print(f"[diag/E0] per-timestep rejection rate (rejected / valid):")
+    for ts in range(n_ts):
+        v = int(val_per_ts[ts])
+        rj = int(rej_per_ts[ts])
+        ratio = rj / max(v, 1)
+        bar = "#" * int(40 * ratio / max(rej_per_ts.max() / max(val_per_ts.max(), 1), 1e-9))
+        print(f"  ts={ts}: {rj:>4}/{v:>4} ({100 * ratio:>5.1f}%) {bar}")
+
+    # ---- Axis 2: per-view (single bad camera?)
+    rej_per_view = rejected.sum(dim=(0, 1)).cpu().numpy()
+    val_per_view = valid_before.sum(dim=(0, 1)).cpu().numpy()
+    print(f"[diag/E0] per-view rejection rate (rejected / valid):")
+    for v_idx, v_name in enumerate(view_names):
+        v = int(val_per_view[v_idx])
+        rj = int(rej_per_view[v_idx])
+        ratio = rj / max(v, 1)
+        print(f"  {v_name:>14}: {rj:>4}/{v:>4} ({100 * ratio:>5.1f}%)")
+
+    # ---- Axis 3: residual distribution of rejected vs accepted obs
+    r_view = r.view(actual_npts, n_obs, 2)
+    res_norm = r_view.norm(dim=-1)                              # (npts, n_obs)
+    res_norm = res_norm.view(actual_npts, n_ts, n_views)        # (npts, n_ts, n_views)
+    rej_residuals = res_norm[rejected].cpu().numpy()
+    acc_residuals = res_norm[accepted].cpu().numpy()
+    bins = [0, 1, 2, 5, 10, 50, 100, 1e9]
+    bin_lbl = ["<1", "1-2", "2-5", "5-10", "10-50", "50-100", "100+"]
+    print(f"[diag/E0] residual distribution (px), accepted vs rejected:")
+    print(f"  {'bin':>9} {'accepted':>10} {'rejected':>10}")
+    for lo, hi, lbl in zip(bins[:-1], bins[1:], bin_lbl):
+        a = int(((acc_residuals >= lo) & (acc_residuals < hi)).sum())
+        rj = int(((rej_residuals >= lo) & (rej_residuals < hi)).sum())
+        print(f"  {lbl:>9} {a:>10} {rj:>10}")
+    if rej_residuals.size > 0:
+        rq = np.quantile(rej_residuals, [0.25, 0.5, 0.75, 0.95])
+        print(f"  rejected quartiles: q25={rq[0]:.2f}  q50={rq[1]:.2f}  "
+              f"q75={rq[2]:.2f}  q95={rq[3]:.2f}")
+
+    # ---- Axis 4: keypoint position (corner concentration?)
+    # Corners are far from image centre; we bin by normalized distance from
+    # centre (0 = centre, 1 = farthest corner of an axis-aligned image).
+    cx, cy = float(centre[0].item()), float(centre[1].item())
+    half_diag = float(np.sqrt(cx ** 2 + cy ** 2))
+    rej_idx = rejected.nonzero(as_tuple=False)
+    if rej_idx.numel() > 0:
+        # uv: (npts, n_ts, n_views, 2)
+        rej_uv = uv[rej_idx[:, 0], rej_idx[:, 1], rej_idx[:, 2]].cpu().numpy()
+        d_norm = np.sqrt(((rej_uv - np.array([cx, cy])) ** 2).sum(axis=-1)) / half_diag
+        d_acc = (
+            uv[accepted.nonzero(as_tuple=False)[:, 0],
+               accepted.nonzero(as_tuple=False)[:, 1],
+               accepted.nonzero(as_tuple=False)[:, 2]].cpu().numpy()
+        )
+        d_acc_norm = (
+            np.sqrt(((d_acc - np.array([cx, cy])) ** 2).sum(axis=-1)) / half_diag
+        )
+        bins = [0.0, 0.25, 0.5, 0.75, 1.0]
+        labels = ["centre", "inner-mid", "outer-mid", "corner"]
+        print(f"[diag/E0] kpt position distribution (normalized dist from centre):")
+        print(f"  {'ring':>10} {'accepted':>10} {'rejected':>10} "
+              f"{'rej%':>8}")
+        for lo, hi, lbl in zip(bins[:-1], bins[1:], labels):
+            a = int(((d_acc_norm >= lo) & (d_acc_norm < hi)).sum())
+            rj = int(((d_norm >= lo) & (d_norm < hi)).sum())
+            ratio = rj / max(a + rj, 1)
+            print(f"  {lbl:>10} {a:>10} {rj:>10} {100 * ratio:>7.1f}%")
 
 
 def _print_obs_histograms(uv, view_names, npts_per_view, n_ts):
@@ -461,6 +561,12 @@ class PoseInitializer():
             rig_R_init, rig_t_init, f_init_t, xyz_init,
             rel_R_all, rel_t_all, self.centre, uv.reshape(-1).contiguous(),
         )
+
+        if diag:
+            _print_e0_rejected_obs(
+                uv, r, mask, view_names, N_ts, N_views, actual_npts,
+                self.centre, self.width, self.height,
+            )
 
         final_residual = (r * mask).abs().sum() / mask.sum().clamp_min(1)
 
