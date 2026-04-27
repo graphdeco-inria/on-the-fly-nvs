@@ -278,6 +278,9 @@ class PoseInitializer():
             # signal to investigate BA hyperparameters or matcher quality.
             self._refine_call_count = 0
             self._refine_fail_count = 0
+            # Stage-2 ablation: collect per-timestep PnP stats keyed by ts idx.
+            # Always populated for rig path; dump is gated on RIG_DUMP_PNP_STATS.
+            self._pnp_stats_per_ts: list[dict] = []
 
     def build_problem(self,
                       desc_kpts_list: list[DescribedKeypoints],
@@ -807,6 +810,27 @@ class PoseInitializer():
         )
 
         if rig_pose is None:
+            # Stage-2 instrumentation: still record failed PnP for accounting.
+            ts_record = {
+                "ts_idx": len(self._pnp_stats_per_ts),
+                "rig_pose_ok": False,
+                "views": {
+                    v: {
+                        "n_correspondences": int(correspondences[v][0].shape[0])
+                        if v in correspondences else 0,
+                        "success": bool(stats.get(v, {}).get("success", False)),
+                        "n_inliers": int(stats.get(v, {}).get("n_inliers", 0)),
+                        "effective_weight": float(
+                            stats.get(v, {}).get("effective_weight", 0.0)
+                        ),
+                        "mean_residual_px": float("nan"),
+                        "residual_std_px": float("nan"),
+                        "n_residual": 0,
+                    }
+                    for v in rig_config.view_names
+                },
+            }
+            self._pnp_stats_per_ts.append(ts_record)
             for view_name, my_idx in view_indices.items():
                 for keyframe in keyframes_per_view[view_name]:
                     keyframe.desc_kpts.matches.pop(my_idx, None)
@@ -815,7 +839,11 @@ class PoseInitializer():
         # Issue #5: refine rig_pose with 1-timestep MiniBARig LM (pose-only).
         # Takes PnP+Fréchet mean output as initial guess, tightens it with
         # full reprojection residual across all 9 views simultaneously.
-        if hasattr(self, "miniba_incr_rig"):
+        # RIG_DISABLE_POSE_REFINE=1 short-circuits this for ablation runs.
+        if (
+            hasattr(self, "miniba_incr_rig")
+            and os.environ.get("RIG_DISABLE_POSE_REFINE", "0") != "1"
+        ):
             self._refine_call_count += 1
             try:
                 rig_pose = self._refine_rig_pose_miniba(rig_pose, correspondences, rig_config)
@@ -830,6 +858,58 @@ class PoseInitializer():
                     f"{self._refine_fail_count}/{self._refine_call_count} "
                     f"({100 * fail_rate:.1f}%)"
                 )
+
+        # Stage-2/3 instrumentation: record per-view stats + per-view
+        # reprojection residual under the FINAL rig_pose (post-refinement when
+        # enabled, PnP+Fréchet otherwise). Residual is computed from the same
+        # correspondences fed to PnP, projected through rel @ rig_pose.
+        ts_record = {
+            "ts_idx": len(self._pnp_stats_per_ts),
+            "rig_pose_ok": True,
+            "views": {},
+        }
+        for v_name in rig_config.view_names:
+            n_corr = (
+                int(correspondences[v_name][0].shape[0])
+                if v_name in correspondences else 0
+            )
+            view_stat = stats.get(v_name, {}) if isinstance(stats, dict) else {}
+            mean_res = float("nan")
+            std_res = float("nan")
+            n_res = 0
+            if v_name in correspondences and n_corr > 0:
+                uv_obs, xyz_w = correspondences[v_name]
+                rel = rig_config.relative_Rt[v_name].to(rig_pose)
+                view_w2c = rel @ rig_pose
+                ones = torch.ones(xyz_w.shape[0], 1, device=xyz_w.device,
+                                  dtype=xyz_w.dtype)
+                xyz_h = torch.cat([xyz_w, ones], dim=1)
+                p_cam = (view_w2c @ xyz_h.T).T  # (N, 4)
+                z = p_cam[:, 2]
+                valid = z > 1e-4
+                if valid.any():
+                    uv_pred = torch.stack(
+                        [
+                            f * p_cam[valid, 0] / z[valid] + self.centre[0],
+                            f * p_cam[valid, 1] / z[valid] + self.centre[1],
+                        ],
+                        dim=1,
+                    )
+                    res = (uv_pred - uv_obs[valid]).norm(dim=1)
+                    mean_res = float(res.mean().item())
+                    std_res = float(res.std().item()) if res.numel() > 1 else 0.0
+                    n_res = int(res.numel())
+            ts_record["views"][v_name] = {
+                "n_correspondences": n_corr,
+                "success": bool(view_stat.get("success", False)),
+                "n_inliers": int(view_stat.get("n_inliers", 0)),
+                "effective_weight": float(view_stat.get("effective_weight", 0.0)),
+                "mean_residual_px": mean_res,
+                "residual_std_px": std_res,
+                "n_residual": n_res,
+            }
+        self._pnp_stats_per_ts.append(ts_record)
+
         return rig_pose, stats
 
     @torch.no_grad()

@@ -548,6 +548,22 @@ if __name__ == "__main__":
           f"n_gauss={n_gauss_final}, "
           f"per-incr-ts n={len(incremental_ts_times)}")
 
+    # Stage-2/3 ablation dump: per-timestep × per-view PnP stats + reproj
+    # residuals collected inside `initialize_incremental_rig`. Gated on env
+    # var so production runs don't pay the dump cost.
+    pnp_dump_path = os.environ.get("RIG_DUMP_PNP_STATS", "")
+    if pnp_dump_path and getattr(args, "use_rig", False):
+        try:
+            stats_list = getattr(pose_initializer, "_pnp_stats_per_ts", [])
+            os.makedirs(os.path.dirname(pnp_dump_path) or ".", exist_ok=True)
+            with open(pnp_dump_path, "w") as _f:
+                import json as _json
+                _json.dump({"per_ts": stats_list}, _f, indent=2)
+            print(f"[stage2-3] dumped {len(stats_list)} ts records → "
+                  f"{pnp_dump_path}")
+        except Exception as _exc:
+            print(f"[stage2-3] dump failed: {_exc}")
+
     # Set to inference mode so that the model can be rendered properly
     scene_model.enable_inference_mode()
 
