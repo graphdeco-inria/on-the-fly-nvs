@@ -36,6 +36,20 @@ class BaseAdam:
             param["val"].grad = None
 
     @torch.no_grad()
+    def add_param(self, key, val, lr):
+        """Dynamically register a new Parameter into this optimizer.
+        Used by scene_model.append_rig_pose during incremental phase."""
+        assert key not in self.params, f"param {key!r} already registered"
+        self.params[key] = {
+            "val": val,
+            "lr": lr,
+            "exp_avg": torch.zeros_like(
+                val, memory_format=torch.preserve_format),
+            "exp_avg_sq": torch.zeros_like(
+                val, memory_format=torch.preserve_format),
+        }
+
+    @torch.no_grad()
     def step(self):
         for param_dict in self.params.values():
             lr = param_dict["lr"]

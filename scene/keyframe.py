@@ -19,7 +19,7 @@ from poses.triangulator import Triangulator
 from scene.dense_extractor import DenseExtractor
 from scene.mono_depth import MonoDepthEstimator, align_depth
 from scene.optimizers import BaseAdam
-from utils import sample, sixD2mtx, make_torch_sampler, depth2points
+from utils import sample, sixD2mtx, mtx2sixD, make_torch_sampler, depth2points
 from dataloaders.read_write_model import Camera, BaseImage, rotmat2qvec
 
 
@@ -75,9 +75,25 @@ class Keyframe:
         self.info = info
         self.is_test = info["is_test"]
 
-        # Optimizable parameters
-        self.rW2C = torch.nn.Parameter(Rt[:3, :2].clone())
-        self.tW2C = torch.nn.Parameter(Rt[:3, 3].clone())
+        # (B-1) Rig mode: keyframe pose is reconstructed from
+        # scene_model.rig_R6D[ts] / rig_t[ts] each forward, instead of being
+        # an nn.Parameter on the keyframe itself.
+        self.rig_view = info.get("rig_view", None)
+        self.ts_idx = info.get("ts_idx", None)
+        self.is_rig_mode = (self.rig_view is not None
+                            and self.ts_idx is not None)
+
+        if self.is_rig_mode:
+            # plain attrs (Keyframe is not nn.Module → no register_buffer).
+            self.rW2C = Rt[:3, :2].clone()
+            self.tW2C = Rt[:3, 3].clone()
+            self.rel_R = info["rig_relative_Rt"][:3, :3].clone().to("cuda")
+            self.rel_t = info["rig_relative_Rt"][:3, 3].clone().to("cuda")
+            self.scene_model = None  # filled by SceneModel.add_keyframe
+        else:
+            self.rW2C = torch.nn.Parameter(Rt[:3, :2].clone())
+            self.tW2C = torch.nn.Parameter(Rt[:3, 3].clone())
+
         exposure = torch.eye(3, 4, device="cuda")
         self.exposure = torch.nn.Parameter(exposure)
         self.depth_scale = torch.nn.Parameter(torch.ones(1, device="cuda"))
@@ -86,8 +102,6 @@ class Keyframe:
         # Optimizer
         if not inference_mode: # Only create optimizer in training mode
             params = {
-                "rW2C": {"val": self.rW2C, "lr": args.lr_poses},
-                "tW2C": {"val": self.tW2C, "lr": args.lr_poses},
                 "depth_scale": {
                     "val": self.depth_scale,
                     "lr": args.lr_depth_scale_offset,
@@ -97,6 +111,11 @@ class Keyframe:
                     "lr": args.lr_depth_scale_offset,
                 },
             }
+            if not self.is_rig_mode:
+                # rig mode: rW2C/tW2C are not nn.Parameter → not optimized here.
+                # The rig pose is owned by scene_model.rig_optimizer instead.
+                params["rW2C"] = {"val": self.rW2C, "lr": args.lr_poses}
+                params["tW2C"] = {"val": self.tW2C, "lr": args.lr_poses}
             if not info["is_test"]:
                 params["exposure"] = {"val": self.exposure, "lr": args.lr_exposure}
             self.optimizer = BaseAdam(params, betas=(0.8, 0.99))
@@ -124,9 +143,15 @@ class Keyframe:
         return self.image_pyr[0].device
 
     def get_R(self):
+        if self.is_rig_mode and self.scene_model is not None:
+            rig_R = sixD2mtx(self.scene_model.rig_R6D[self.ts_idx])
+            return self.rel_R @ rig_R
         return sixD2mtx(self.rW2C)
 
     def get_t(self):
+        if self.is_rig_mode and self.scene_model is not None:
+            rig_t = self.scene_model.rig_t[self.ts_idx]
+            return self.rel_R @ rig_t + self.rel_t
         return self.tW2C
 
     def get_Rt(self):
@@ -136,8 +161,21 @@ class Keyframe:
         return Rt
 
     def set_Rt(self, Rt: torch.Tensor):
-        self.rW2C.data.copy_(Rt[:3, :2])
-        self.tW2C.data.copy_(Rt[:3, 3])
+        if self.is_rig_mode and self.scene_model is not None:
+            # view_Rt = rel @ rig_Rt → rig_Rt = rel⁻¹ @ view_Rt
+            rel_R_inv = self.rel_R.T
+            rig_R = rel_R_inv @ Rt[:3, :3]
+            rig_t = rel_R_inv @ (Rt[:3, 3] - self.rel_t)
+            with torch.no_grad():
+                self.scene_model.rig_R6D[self.ts_idx].data.copy_(
+                    mtx2sixD(rig_R[None])[0]
+                )
+                self.scene_model.rig_t[self.ts_idx].data.copy_(rig_t)
+            # Stale moment after BA-applied rig_pose: not reset here. If first
+            # photometric step blows up, see §8 of patch v2 (zero exp_avg).
+        else:
+            self.rW2C.data.copy_(Rt[:3, :2])
+            self.tW2C.data.copy_(Rt[:3, 3])
 
         self.approx_centre = -Rt[:3, :3].T @ Rt[:3, 3]
 

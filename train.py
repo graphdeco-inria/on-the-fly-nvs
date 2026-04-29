@@ -34,7 +34,7 @@ from scene.scene_model import SceneModel
 from gaussianviewer import GaussianViewer
 from webviewer.webviewer import WebViewer
 from graphdecoviewer.types import ViewerMode
-from utils import align_mean_up_fwd, increment_runtime
+from utils import align_mean_up_fwd, increment_runtime, mtx2sixD
 
 if __name__ == "__main__":
     torch.random.manual_seed(0)
@@ -203,6 +203,14 @@ if __name__ == "__main__":
                 focal = f_out.cpu().item()
                 increment_runtime(runtimes["BAB"], start_time)
 
+                # (B-1) Register rig poses on scene_model. From here on the
+                # photometric optimizer owns rig_R6D / rig_t; per-view
+                # rW2C/tW2C are inert plain tensors.
+                rig_R6D_init = mtx2sixD(rig_Rts[:, :3, :3].contiguous())
+                rig_t_init = rig_Rts[:, :3, 3].contiguous()
+                scene_model.register_rig_poses(
+                    rig_R6D_init, rig_t_init, lr=args.lr_poses)
+
                 f_tensor = torch.tensor([focal], device="cuda", dtype=torch.float32)
                 ref_kf_scene_indices = []  # indices (into scene_model.keyframes) of ref keyframes
                 start_time = time.time()
@@ -212,6 +220,9 @@ if __name__ == "__main__":
                         img, inf, desc = data["frames"][v_name]
                         rel = inf["rig_relative_Rt"].to("cuda")
                         Rt_view = rel @ rig_pose
+                        # (B-1) tag inf so Keyframe.__init__ takes the rig branch.
+                        inf["ts_idx"] = ts_i
+                        inf["rig_view"] = v_name
                         kf = Keyframe(
                             img, inf, desc, Rt_view, n_keyframes, f_tensor,
                             dense_extractor, depth_estimator, triangulator, args,
@@ -277,12 +288,22 @@ if __name__ == "__main__":
             if rig_pose is None:
                 continue
 
+            # (B-1) Append rig pose for this ts before creating keyframes so
+            # they pick up the right ts_idx and the optimizer has a slot.
+            new_R6D = mtx2sixD(rig_pose[:3, :3][None].contiguous())[0]
+            new_t = rig_pose[:3, 3].contiguous()
+            scene_model.append_rig_pose(new_R6D, new_t)
+            new_ts_idx = len(scene_model.rig_R6D) - 1
+
             f_tensor = torch.tensor([focal], device="cuda", dtype=torch.float32)
             start_time = time.time()
             for v_name in view_order:
                 img, inf, desc = rig_batch[v_name]
                 rel = inf["rig_relative_Rt"].to("cuda")
                 Rt_view = rel @ rig_pose
+                # (B-1) tag inf so Keyframe.__init__ takes the rig branch.
+                inf["ts_idx"] = new_ts_idx
+                inf["rig_view"] = v_name
                 kf = Keyframe(
                     img, inf, desc, Rt_view, n_keyframes, f_tensor,
                     dense_extractor, depth_estimator, triangulator, args,

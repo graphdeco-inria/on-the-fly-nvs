@@ -160,6 +160,14 @@ class SceneModel:
         self.lock = threading.Lock()
         self.inference_mode = inference_mode
 
+        # (B-1) Rig-aware pose parameters. Populated by register_rig_poses
+        # after bootstrap_rig and grown by append_rig_pose each incremental ts.
+        # When rig_optimizer is not None, get_Rts() bypasses cached_Rts so
+        # photometric backward sees a fresh autograd graph each forward.
+        self.rig_R6D = torch.nn.ParameterList()
+        self.rig_t = torch.nn.ParameterList()
+        self.rig_optimizer = None
+
         ## Initialize helpers for Gaussian initialization
         radius = 3
         self.disc_kernel = torch.zeros(1, 1, 2 * radius + 1, 2 * radius + 1)
@@ -280,6 +288,8 @@ class SceneModel:
         # Zero gradients
         keyframe.zero_grad()
         self.optimizer.zero_grad()
+        if self.rig_optimizer is not None:  # (B-1)
+            self.rig_optimizer.zero_grad()
 
         # Render image and depth
         render_pkg = self.render_from_id(
@@ -316,6 +326,13 @@ class SceneModel:
         with torch.no_grad():
             # Pose optimization
             keyframe.step()
+            # (B-1) rig pose step — only on non-test keyframes (test keyframes
+            # don't get Gaussian updates, so we keep them out of the
+            # photometric pose loop too for symmetry with the original code).
+            if (getattr(keyframe, "is_rig_mode", False)
+                    and self.rig_optimizer is not None
+                    and not keyframe.info["is_test"]):
+                self.rig_optimizer.step()
 
             # Skip the scene optimization if the current keyframe is a test keyframe
             if not keyframe.info["is_test"]:
@@ -623,6 +640,12 @@ class SceneModel:
         return prev_keyframes
 
     def get_Rts(self):
+        # (B-1 P0) rig mode: bypass cache. rig_R6D / rig_t are stepped every
+        # photometric iteration, so a cached Rt tensor would carry an old
+        # autograd graph and break backward on the second forward.
+        if self.rig_optimizer is not None:
+            return torch.stack([kf.get_Rt() for kf in self.keyframes])
+
         invalid_ids = torch.where(~self.valid_Rt_cache)[0]
         if len(invalid_ids) > 0:
             for keyframe_id in invalid_ids:
@@ -854,11 +877,52 @@ class SceneModel:
             self.active_frames_gpu.insert(0, frame_id)
             self.active_frames_cpu.remove(frame_id) 
 
+    def register_rig_poses(self, rig_R6D_init: torch.Tensor,
+                           rig_t_init: torch.Tensor, lr: float):
+        """(B-1) Bootstrap-time setup. Takes (N_ts, 3, 2) and (N_ts, 3) tensors,
+        wraps each ts pose as an nn.Parameter, and creates a BaseAdam over
+        them. Called from train.py once after pose_initializer has produced
+        the bootstrap rig poses."""
+        from scene.optimizers import BaseAdam
+        assert len(self.rig_R6D) == 0, "rig_poses already registered"
+        params = {}
+        for i in range(rig_R6D_init.shape[0]):
+            p_R = torch.nn.Parameter(rig_R6D_init[i].clone())
+            p_t = torch.nn.Parameter(rig_t_init[i].clone())
+            self.rig_R6D.append(p_R)
+            self.rig_t.append(p_t)
+            params[f"rig_R6D_{i}"] = {"val": p_R, "lr": lr}
+            params[f"rig_t_{i}"] = {"val": p_t, "lr": lr}
+        self.rig_optimizer = BaseAdam(params, betas=(0.8, 0.99))
+
+    def append_rig_pose(self, rig_R6D_new: torch.Tensor,
+                        rig_t_new: torch.Tensor, lr: float = None):
+        """(B-1) Incremental-time grow. Adds one ts to rig_R6D / rig_t and
+        registers the new params with rig_optimizer (preserving moments for
+        existing ts)."""
+        assert self.rig_optimizer is not None, \
+            "register_rig_poses must be called before append_rig_pose"
+        p_R = torch.nn.Parameter(rig_R6D_new.clone())
+        p_t = torch.nn.Parameter(rig_t_new.clone())
+        self.rig_R6D.append(p_R)
+        self.rig_t.append(p_t)
+        new_idx = len(self.rig_R6D) - 1
+        if lr is None:
+            lr = next(iter(self.rig_optimizer.params.values()))["lr"]
+        self.rig_optimizer.add_param(f"rig_R6D_{new_idx}", p_R, lr=lr)
+        self.rig_optimizer.add_param(f"rig_t_{new_idx}", p_t, lr=lr)
+
     def add_keyframe(self, keyframe: Keyframe, f=None):
         """Add a keyframe to the scene, add and prune Gaussians"""
 
-        # Make sure training is not running 
+        # Make sure training is not running
         self.join_optimization_thread()
+
+        # (B-1) attach scene_model back-reference so get_R/get_t use the
+        # rig pose path. Done before keyframe.get_Rt() is called below so
+        # the cached_Rts entry is in the rig frame.
+        if getattr(keyframe, "is_rig_mode", False):
+            keyframe.scene_model = self
 
         ## Add the keyframe and update the indices (sorted by distance to last keyframe)
         self.keyframes.append(keyframe)
