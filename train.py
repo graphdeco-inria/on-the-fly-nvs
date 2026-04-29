@@ -37,11 +37,11 @@ from graphdecoviewer.types import ViewerMode
 from utils import align_mean_up_fwd, increment_runtime, mtx2sixD
 
 if __name__ == "__main__":
-    torch.random.manual_seed(0)
-    torch.cuda.manual_seed(0)
-    np.random.seed(0)
-
     args = get_args()
+    seed = getattr(args, "seed", 0)
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
 
     # Initialize dataloader
     if "://" in args.source_path:

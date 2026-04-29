@@ -42,7 +42,9 @@ def get_args():
         
     ## Learning Rates
     parser.add_argument('--lr_poses', type=float, default=1e-4, help="Pose learning rate")
-    parser.add_argument('--lr_exposure', type=float, default=5e-4, 
+    parser.add_argument('--seed', type=int, default=0,
+                        help="Random seed (torch + numpy). Used for multi-run studies.")
+    parser.add_argument('--lr_exposure', type=float, default=5e-4,
                         help="Exposure compensation learning rate")
     parser.add_argument('--lr_depth_scale_offset', type=float, default=1e-4)
     parser.add_argument('--position_lr_init', type=float, default=0.00005, 
