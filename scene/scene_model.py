@@ -250,6 +250,18 @@ class SceneModel:
 
         scene_model.active_anchor = scene_model.anchors[0]
 
+        # Restore rig poses (before adding keyframes so kf.scene_model link is valid)
+        rig_poses = metadata.get("rig_poses")
+        if rig_poses is not None:
+            for r6d in rig_poses["rig_R6D"]:
+                scene_model.rig_R6D.append(
+                    torch.nn.Parameter(torch.tensor(r6d, device="cuda", dtype=torch.float32))
+                )
+            for t in rig_poses["rig_t"]:
+                scene_model.rig_t.append(
+                    torch.nn.Parameter(torch.tensor(t, device="cuda", dtype=torch.float32))
+                )
+
         # Load keyframes
         for i in range(len(metadata["keyframes"])):
             keyframe = Keyframe.from_json(metadata["keyframes"][i], i, width, height)
@@ -1109,6 +1121,14 @@ class SceneModel:
                 for anchor in self.anchors
             ],
             "keyframes": [keyframe.to_json() for keyframe in self.keyframes],
+            "rig_poses": (
+                {
+                    "rig_R6D": [p.detach().cpu().numpy().tolist() for p in self.rig_R6D],
+                    "rig_t":   [p.detach().cpu().numpy().tolist() for p in self.rig_t],
+                }
+                if len(self.rig_R6D) > 0
+                else None
+            ),
         }
         metadata = {**metrics, **metadata}
 
